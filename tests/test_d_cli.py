@@ -119,14 +119,14 @@ def test_map_missing_option_argument(synth, reads):
 def test_missing_index_aborts(reads, tmp_path, cmd):
 	"""A missing index aborts (SIGABRT) with `[E::main_<cmd>] failed to load the index. ABORT!` before any
 	output; so does --meth on an index built without --meth."""
-	r = _run([cmd, str(tmp_path / "nope"), reads["fq"]])
+	r = D.run_minibwa_abort([cmd, str(tmp_path / "nope"), reads["fq"]])
 	assert r.returncode == SIGABRT and r.stdout == ""
 	assert "[E::main_%s] failed to load the index. ABORT!" % cmd in r.stderr
 
 
 def test_meth_needs_meth_index(synth, reads):
 	"""--meth loads <prefix>.meth.mbw; on an index built without --meth the load fails and map aborts."""
-	r = _run(["map", "--meth", synth.index, reads["fq"]])
+	r = D.run_minibwa_abort(["map", "--meth", synth.index, reads["fq"]])
 	assert r.returncode == SIGABRT and r.stdout == ""
 	assert "[E::main_map] failed to load the index. ABORT!" in r.stderr
 
