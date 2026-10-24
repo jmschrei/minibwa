@@ -10,6 +10,7 @@ comparison is of the full output bytes (apart from the @PG line).
 
 import pytest
 
+import helpers_d as D
 import minibwa_helpers as H
 
 
@@ -73,6 +74,31 @@ def test_chrm_invariance(chrm):
 	"""The shipped chrM pairs (real reads, inferred insert sizes): -t 1 and -t 4 agree, in SAM and PAF."""
 	for args in ([], ["-f"]):
 		assert _out(chrm.index, [chrm.read1, chrm.read2], args, 4) == _out(chrm.index, [chrm.read1, chrm.read2], args, 1)
+
+
+@pytest.mark.thread_invariance
+def test_larger_input_invariance(synth, tmp_path):
+	"""A moderately larger input, so that -t 8 runs hundreds of sub-batches concurrently and -K splits it
+	into several pipeline batches: 12,000 single-end reads (60-300 bp, about 2.2 Mbp, plus 30 long reads)
+	and 4,000 pairs. Single-end SAM (-b cs --outn 2) and PAF, and paired-end SAM with inferred statistics
+	(one batch) and with -I, are byte-identical at -t 1 and -t 8; with -K 400k (SE) or -I (PE) also across
+	batch sizes."""
+	se = D.bulk_reads(synth.genome, 12000, seed=161)
+	se += [(r.name, r.seq) for r in H.simulate_long_reads(synth.genome, 30, seed=162, qual=None)]
+	fa = H.write_fasta(str(tmp_path / "big.fa"), se)
+	r1, r2 = D.bulk_pairs(synth.genome, 4000, seed=163)
+	p1 = H.write_fasta(str(tmp_path / "big_1.fa"), r1)
+	p2 = H.write_fasta(str(tmp_path / "big_2.fa"), r2)
+	args = ["-b", "cs", "--outn", "2"]
+	a = _out(synth.index, fa, args, 1)
+	assert len(a) > 3000000
+	assert _out(synth.index, fa, args, 8) == a
+	assert _out(synth.index, fa, args + ["-K", "400k"], 8) == a
+	assert _out(synth.index, fa, ["-f"], 8) == _out(synth.index, fa, ["-f"], 1)
+	pe = _out(synth.index, [p1, p2], [], 1)
+	assert _out(synth.index, [p1, p2], [], 8) == pe
+	fixed = _out(synth.index, [p1, p2], ["-I", "350,40"], 1)
+	assert _out(synth.index, [p1, p2], ["-I", "350,40", "-K", "300k"], 8) == fixed
 
 
 @pytest.mark.pinned

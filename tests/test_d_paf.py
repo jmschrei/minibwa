@@ -197,7 +197,7 @@ def test_chain_only_outs_uses_chain_score(index_of, tmp_path):
 	assert all(len(v) >= 4 for v in by.values())
 	for p in every:
 		assert "cg" not in p.tags and "NM" not in p.tags
-	for outs in ("0.9", "0.75", "0.5"):
+	for outs in ("1", "0.9", "0.75", "0.5"):  # with 1, family B's six equal secondary chains sit on the bound
 		f = struct.unpack("f", struct.pack("f", float(outs)))[0]
 		got = H.run_map(idx, fq, ["--chain-only", "--outn", "100", "--outs", outs]).paf()
 		gb = {}
@@ -209,6 +209,8 @@ def test_chain_only_outs_uses_chain_score(index_of, tmp_path):
 			assert pri.tags["s2"] == max(x.tags["s1"] for x in v[1:])
 			want = [pri.line] + [x.line for x in v[1:] if x.tags["s1"] >= f * pri.tags["s1"]]
 			assert [x.line for x in gb[q]] == want
+			if outs == "1" and q == "b":
+				assert len(want) == 7  # precondition: the bound is reached
 
 
 @pytest.mark.pinned

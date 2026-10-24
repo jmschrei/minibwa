@@ -115,6 +115,42 @@ def test_noisy_reads_count_other_mismatches(synth, bs):
 	assert extra >= 60
 
 
+def test_mate_rescue_converts_the_rescued_mate(synth, bs, tmp_path):
+	"""Mate rescue in --meth mode aligns the rescued mate with its own conversion (read 1 C->T, read 2
+	G->A): in 24 clean directional pairs, alternately read 2 or read 1 carries a substitution every 15
+	bases, so it has no seed and only rescue next to its mate can place it. With fixed insert-size
+	statistics (-I) every such mate is rescued at its true position as a proper pair, and its NM counts
+	the substitutions but not the bisulfite conversions."""
+	from helpers_c import substitute, unseedable_subs
+	pairs = D.bisulfite_pairs(synth.genome, 24, seed=211)
+	r1, r2, unseed = [], [], {}
+	for k, (n, a, b, info) in enumerate(pairs):
+		if k % 2 == 0:
+			b = substitute(b, unseedable_subs(len(b)))
+			unseed[n] = 2
+		else:
+			a = substitute(a, unseedable_subs(len(a)))
+			unseed[n] = 1
+		r1.append((n, a))
+		r2.append((n, b))
+	f1 = H.write_fasta(str(tmp_path / "u1.fa"), r1)
+	f2 = H.write_fasta(str(tmp_path / "u2.fa"), r2)
+	info = dict((p[0], p[3]) for p in pairs)
+	assert all(r.is_unmapped for r in H.run_map(bs.index, [f1, f2], ["--meth", "-I", "325,45", "-P"]).sam().records
+		if r.segment == unseed[r.qname])  # precondition: no seed of its own
+	sam = H.run_map(bs.index, [f1, f2], ["--meth", "-I", "325,45"]).sam()
+	assert H.pair_invariant_errors(sam) == []
+	prim = sam.primaries()
+	n_clean = 0
+	for name, seg in unseed.items():
+		rec = prim[(name, seg)]
+		assert not rec.is_unmapped and rec.is_proper_pair, (name, seg)
+		nm, raw = _check_record(rec, synth.genome, info[name], seg)
+		assert nm <= 10 < raw, rec.line[:120]  # 10 substitutions; conversions are not counted
+		n_clean += rec.cigar == "150M" and nm == 10
+	assert n_clean >= 18
+
+
 def _anchor_blocks(stderr):
 	"""--dbg-qname/--dbg-anchor output at -t 1: [(qname, [(qs, strand, ctg, ts, len)])] in mapping order."""
 	out = []

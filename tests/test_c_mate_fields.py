@@ -83,6 +83,14 @@ def _build():
 		p = C.Pair(name, r1, r2)
 		p.supp = (c5, p5)
 		sc.append(Scenario(p, ("chrA", s, False, "50S100M"), _exp(r2), True))
+	# chimeric read 1 (50 bp from chrB, then 100 bp from chrA) whose mate is unmapped: the unmapped mate
+	# is placed at read 1's primary on chrA, so read 1's supplementary record on chrB names chrA in RNEXT
+	s = 25000
+	seq = g["chrB"][7000:7050] + g["chrA"][s:s + 100]
+	r1 = C.Mate("chimun", seq, C._qual("chimun", 150), "chrA", s, s + 100, False, [])
+	p = C.Pair("chimun", r1, _random_mate("chimun", 615))
+	p.supp = ("chrB", 7000)
+	sc.append(Scenario(p, ("chrA", s, False, "50S100M"), None, False))
 	single = C.mate_at(g, "single", "chrB", 9000, True)
 	return g, sc, single
 
@@ -192,7 +200,10 @@ def test_all_records_mate_fields(mf):
 		if r.is_supplementary:
 			seen_supp += 1
 			assert (r.rname, r.pos0, r.cigar) == (s.pair.supp[0], s.pair.supp[1], "50M100H")
-	assert seen_supp == 2 and seen_sec == 1
+	assert seen_supp == 3 and seen_sec == 1
+	sup = [r for r in sam.records if r.qname == "chimun" and r.is_supplementary][0]
+	pri = prim[("chimun", 1)]
+	assert (sup.rnext, sup.pnext, sup.tlen) == (pri.rname, pri.pos, 0) and sup.mate_unmapped
 	sec = [r for r in sam.records if r.is_secondary][0]
 	assert (sec.qname, sec.rname, sec.pos0, sec.flag) == ("rep2", "chrA", 30000, 0x100 | 0x1 | 0x10 | 0x80)
 	assert sec.tlen == -(30149 - 10000 + 1)

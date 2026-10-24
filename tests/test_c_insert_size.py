@@ -194,6 +194,26 @@ def test_20_pairs_infer_statistics(ins_genome, long_inserts, tmp_path):
 	assert sum(r.is_proper_pair for r in sam.records) == 40
 
 
+def test_single_reads_do_not_count_as_pairs(ins_genome, long_inserts, tmp_path):
+	"""Only pairs count toward the 20 that make a batch infer its statistics: 19 pairs interleaved with
+	6 single reads (25 fragments) use the default statistics, so the 1100 bp pairs are not proper;
+	with the 20th pair added the batch infers them and the pairs are proper."""
+	g, idx = ins_genome
+	singles = [C.mate_at(g, "single%d" % i, "chrB", 2000 + i * 5000, bool(i & 1)) for i in range(6)]
+	for n, proper in ((19, False), (20, True)):
+		items = []
+		for i, p in enumerate(long_inserts[:n]):
+			items.append(p)
+			if i % 3 == 0 and i // 3 < len(singles):
+				items.append(singles[i // 3])
+		il = C.write_interleaved_c(str(tmp_path / ("il%d.fq" % n)), items)
+		res = H.run_map(idx, il)
+		assert C.has_pestat_report(res.stderr) == proper
+		sam = res.sam()
+		assert sum(r.segment == 0 for r in sam.records) == 6
+		assert all(r.is_proper_pair == proper for r in sam.records if r.segment), n
+
+
 def test_20_pairs_with_19_unique_disable_pairing(ins_genome, long_inserts, tmp_path):
 	"""20 pairs in the batch but only 19 unique ones: statistics are inferred, every orientation
 	fails (fewer than 20 candidates), nothing is paired or rescued, and the output equals -P."""

@@ -62,7 +62,7 @@ static void check_hits(const mb_idx_t *idx, const char *name, int32_t qlen, int3
 	MBT_CHECKF(n_hit == 0 || n_sam_pri == 1, "%s: %d SAM-primary hits among %d", name, n_sam_pri, n_hit);
 }
 
-/* one line per hit: the fields of `minibwa map -f` plus sam_pri */
+/* one line per hit: the fields of `minibwa map -f` plus sam_pri (sp:i) and proper_pair (pp:i) */
 static void print_hits(const mb_idx_t *idx, const char *name, int32_t qlen, int32_t n_hit, const mb_hit_t *hit)
 {
 	int32_t j, k;
@@ -81,7 +81,7 @@ static void print_hits(const mb_idx_t *idx, const char *name, int32_t qlen, int3
 				printf("%d%c", h->p->cigar[k] >> 4, MB_CIGAR_STR[h->p->cigar[k] & 0xf]);
 			if (h->p->cs) printf("\t%s", (const char*)&h->p->cigar[h->p->n_cigar]);
 		}
-		printf("\tsp:i:%d\n", h->sam_pri);
+		printf("\tsp:i:%d\tpp:i:%d\n", h->sam_pri, h->proper_pair);
 	}
 }
 

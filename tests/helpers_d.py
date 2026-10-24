@@ -14,6 +14,7 @@ the standard library only.
 	                        scoring (match 2, mismatch 8, ambiguous 1)
 	expected_sa()           SA:Z entries recomputed from the other records
 	mb_version()            MB_VERSION read from minibwa.h
+	bulk_reads/bulk_pairs   many reads quickly (no recorded truth), for invariance tests
 """
 
 import os
@@ -343,3 +344,48 @@ def parse_xa(value):
 		f = e.split(",")
 		out.append((f[0], f[1][0], int(f[1][1:]), f[2], int(f[3])))
 	return out
+
+
+# ---------------------------------------------------------------------------
+# Bulk reads (no truth recorded; fast enough for tens of thousands of reads)
+# ---------------------------------------------------------------------------
+
+def _bulk_fragment(genome, rng, contigs, length):
+	ctg = contigs[rng.below(len(contigs))]
+	st = rng.below(genome.length(ctg) - length + 1)
+	seq = list(genome[ctg][st:st + length])
+	for _ in range(rng.below(4)):  # 0-3 substitutions
+		k = rng.below(length)
+		seq[k] = "ACGT"[("ACGT".index(seq[k].upper()) + 1 + rng.below(3)) % 4] if seq[k].upper() in "ACGT" else "A"
+	if rng.below(20) == 0:  # an occasional 1-3 bp deletion inside the read
+		k = 20 + rng.below(max(1, length - 40))
+		del seq[k:k + 1 + rng.below(3)]
+	return "".join(seq)
+
+
+def bulk_reads(genome, n, length=(60, 300), seed=1, name_prefix="k"):
+	"""n (name, seq) reads from the contigs longer than 5 kbp, lengths uniform in `length`, either strand,
+	with up to three substitutions and an occasional short deletion. Not uniquely placed; no truth."""
+	rng = H.Rng(seed)
+	contigs = [c for c in genome.names if genome.length(c) > 5000]
+	out = []
+	for i in range(n):
+		seq = _bulk_fragment(genome, rng, contigs, rng.randint(length[0], length[1]))
+		out.append(("%s%d" % (name_prefix, i), seq if rng.below(2) else H.revcomp(seq)))
+	return out
+
+
+def bulk_pairs(genome, n, read_len=150, insert=(250, 450), seed=1, name_prefix="kp"):
+	"""n FR pairs as ([(name, read 1)], [(name, read 2)]): read 1 from one end of a fragment of uniform
+	length in `insert`, read 2 the reverse complement of the other end, on either strand."""
+	rng = H.Rng(seed)
+	contigs = [c for c in genome.names if genome.length(c) > 5000]
+	r1, r2 = [], []
+	for i in range(n):
+		frag = _bulk_fragment(genome, rng, contigs, rng.randint(insert[0], insert[1]))
+		if rng.below(2):
+			frag = H.revcomp(frag)
+		name = "%s%d" % (name_prefix, i)
+		r1.append((name, frag[:read_len]))
+		r2.append((name, H.revcomp(frag[-read_len:])))
+	return r1, r2

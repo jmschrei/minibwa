@@ -4,7 +4,7 @@ mb_map() and mb_map_batch() must return, for every read, the hits that
 `minibwa map` writes; the hits must not depend on the thread buffer, kalloc,
 the input encoding, the index loader or the sub-batch size. The driver
 prints each hit in the column layout of `minibwa map -f` (plus `sp:i:` for
-mb_hit_t.sam_pri), so the comparison covers every public mb_hit_t and
+mb_hit_t.sam_pri and `pp:i:` for proper_pair), so the comparison covers every public mb_hit_t and
 mb_extra_t field that the PAF writer reports.
 """
 
@@ -31,7 +31,7 @@ def mixed(synth, tmp_path_factory):
 
 
 def _dump(prefix, reads, mode="one", is_meth=0, opts=()):
-	"""Run the dump case; return (hit lines without the trailing sp:i field, sam_pri lines, n_hit lines)."""
+	"""Run the dump case; return (hit lines without the trailing sp:i/pp:i fields, full hit lines, n_hit lines)."""
 	r = H.run_c_case("drv_dapi", "dump", [prefix, is_meth, mode, reads] + list(opts))
 	if not r.passed:
 		raise AssertionError(r.report())
@@ -100,8 +100,9 @@ def test_api_modes_give_identical_hits(synth, mixed):
 
 
 def test_batch_pairs_adjacent_reads(synth, tmp_path):
-	"""With MB_F_PE (the mb_opt_init() default) mb_map_batch() pairs reads 2i and 2i+1: mates of FR pairs
-	get proper_pair hits at their true positions; with MB_F_NO_PAIRING the hits equal mb_map()'s."""
+	"""With MB_F_PE (the mb_opt_init() default) mb_map_batch() pairs reads 2i and 2i+1, the last pair
+	included: mates of FR pairs (inserts within the default bounds 50-800) get proper_pair hits at their
+	true positions; with MB_F_NO_PAIRING the hits equal mb_map()'s."""
 	pairs = H.simulate_pairs(synth.genome, 30, seed=71, unique=True)
 	fa = H.write_fasta(str(tmp_path / "il.fa"), [r for p in pairs for r in (p.r1, p.r2)])
 	_, full, _ = _dump(synth.index, fa, "batch")
@@ -110,12 +111,14 @@ def test_batch_pairs_adjacent_reads(synth, tmp_path):
 		f = l.split("\t")
 		byname.setdefault(f[0], []).append(f)
 	for p in pairs:
+		assert 50 <= p.insert <= 800
 		got = byname[p.name]
-		pri = [f for f in got if f[-1] == "sp:i:1"]
+		pri = [f for f in got if f[-2] == "sp:i:1"]
 		assert len(pri) == 2
 		for f, r in zip(pri, (p.r1, p.r2)):
 			assert f[5] == r.contig and f[4] == r.strand
 			assert abs(int(f[7]) - (r.pos + (int(f[2]) if r.strand == "+" else len(r.seq) - int(f[3])))) <= 3
+			assert f[-1] == "pp:i:1", p.name
 	_, nopair, _ = _dump(synth.index, fa, "batch", opts=("nopair",))
 	_, one, _ = _dump(synth.index, fa, "one")
 	assert nopair == one
