@@ -19,7 +19,32 @@ def pin_inputs(synth, tmp_path_factory):
 	se = H.simulate_reads(g, 300, length=(50, 320), seed=61, sub_rate=0.02, indel_rate=0.004, max_indel=10, n_rate=0.002)
 	chim = [p.r1 for p in H.simulate_hic_pairs(g, 40, read_length=150, seed=63, chimeric_frac=1.0, unique=False, name_prefix="c")]
 	lr = H.simulate_long_reads(g, 40, length=(330, 6000), seed=62, sub_rate=0.01, indel_rate=0.004, max_indel=12)
-	return dict(se=H.write_fastq(str(d / "se.fq"), se + chim), lr=H.write_fastq(str(d / "lr.fq"), lr + _structural_reads(g)))
+	return dict(se=H.write_fastq(str(d / "se.fq"), se + chim), lr=H.write_fastq(str(d / "lr.fq"), lr + _structural_reads(g)),
+		ends=H.write_fastq(str(d / "ends.fq"), _end_indel_reads(g)))
+
+
+def _end_indel_reads(g):
+	"""150 bp reads with a 5-60 bp deletion or a 1-12 bp insertion 8-45 bases from one end:
+	where the extension window, the end bonus and the gap costs decide between clipping and
+	aligning through the indel."""
+	rng = H.Rng(65)
+	out = []
+	for i in range(120):
+		c = g.names[i % 2]
+		seq = g[c]
+		o = rng.below(len(seq) - 400)
+		tail = 8 + rng.below(38)
+		head = 150 - tail if i % 4 < 2 else tail  # the indel near the right or the left end
+		if i % 3 == 2:  # insertion
+			m = 1 + rng.below(12)
+			r = seq[o:o + head - m] + rng.dna(m) + seq[o + head - m:o + 150 - m]
+		else:  # deletion
+			m = 5 + rng.below(56)
+			r = seq[o:o + head] + seq[o + head + m:o + 150 + m]
+		if i % 2:
+			r = H.revcomp(r)  # mapped to the reverse strand
+		out.append(("e%d" % i, r, "I" * len(r)))
+	return out
 
 
 def _structural_reads(g):
@@ -61,6 +86,8 @@ PINS = [
 	("b_lr_preset_sr.sam.gz", "lr", ["-x", "sr", "-b", "ds"]),
 	("b_lr_bands.sam.gz", "lr", ["-W", "2000", "-g", "2000", "-l", "1000", "-w", "50", "--eqx"]),
 	("b_se_chain_only.paf.gz", "se", ["--chain-only", "--outn", "5"]),
+	("b_end_indels.sam.gz", "ends", ["-b", "cs"]),
+	("b_end_indels_scores.paf.gz", "ends", ["-f", "-O", "6,20", "-E", "3,1", "-B", "6", "-w", "20"]),
 	("b_lr_chain_only.paf.gz", "lr", ["--chain-only"]),
 ]
 
