@@ -333,11 +333,12 @@ def make_tiny():
 	"""A ~3.5 kbp genome for exhaustive checks against the naive suffix array.
 
 	Contigs t1 (2000 bp, with a comment), t2 (1200 bp, starting with an N run, with a
-	lowercase n two bases before its end) and four short contigs of 7, 33, 64 and 129 bp.
-	A 100 bp family F1 has three copies on both strands; a 40 bp family F2 has 14 exact
-	copies (more than minibwa's 10-occurrence sub-SMEM limit); there is a 300 bp lowercase
-	stretch with an F1 copy in it, a 30 bp poly-A, a (CA)20 tract, a 30 bp N run and
-	scattered IUPAC codes. No contig ends in an ambiguous base: base minibwa leaves a
+	lowercase n two bases before its end), four short contigs of 7, 33, 64 and 129 bp and
+	t3 (1500 bp). A 100 bp family F1 has three copies on both strands; a 40 bp family F2
+	has 14 exact copies of its own; t3 holds ten copies of a 60 bp F4 that contains F2, so
+	an F4 match occurs exactly 10 times (minibwa's sub-SMEM limit) and F2 24 times; there
+	is a 300 bp lowercase stretch with an F1 copy in it, a 30 bp poly-A, a (CA)20 tract, a
+	30 bp N run and scattered IUPAC codes. No contig ends in an ambiguous base: base minibwa leaves a
 	contig's final run of ambiguous bases out of the .l2b ambiguity list, so l2b_getseq
 	returns the random bases there instead of 4. Returns (contigs, features) with contigs
 	a list of (name, seq) and features a dict of named positions."""
@@ -375,6 +376,14 @@ def make_tiny():
 	contigs = [("t1", "".join(t1)), ("t2", "".join(t2))]
 	for name, n in (("s1", 7), ("s2", 33), ("s3", 64), ("s4", 129)):
 		contigs.append((name, rng.dna(n)))
+	# t3: ten copies of F4 = 10 bp + F2 + 10 bp, so an F4 match occurs exactly 10 times
+	# (minibwa's sub-SMEM limit) and holds the more frequent F2
+	f4 = rng.dna(10) + f2 + rng.dna(10)
+	feats["f4"] = f4
+	t3 = list(rng.dna(1500))
+	for i in range(10):
+		put(t3, 50 + 140 * i, f4 if i % 2 else H.revcomp(f4))
+	contigs.append(("t3", "".join(t3)))
 	return contigs, feats
 
 
@@ -443,7 +452,7 @@ def tiny_reads(contigs, feats, ref):
 	for k in range(6):
 		add("f2", rng.dna(rng.randint(10, 40)) + (feats["f2"] if k % 2 else H.revcomp(feats["f2"])) + rng.dna(rng.randint(10, 40)))
 	# exact text substrings crossing contig ends and the strand boundary
-	F, T, tot = ref.fwd, ref.text, ref.tot
+	T, tot = ref.text, ref.tot
 	for a, b in ((ref.offs[1], 40), (ref.offs[3], 25), (ref.offs[4], 30), (ref.offs[5], 50), (tot, 45), (tot, 12)):
 		add("junc", T[a - b:a + b])
 	# through the reference N run of t1 (the text has random bases there)
@@ -467,6 +476,11 @@ def tiny_reads(contigs, feats, ref):
 	add("exact_s1", g["s1"])
 	add("exact_s2", H.revcomp(g["s2"]))
 	add("chimera", g["t1"][200:260] + H.revcomp(g["t2"][900:960]))
+	# an F4 match occurring exactly 10 times, bounded by the read ends or by N
+	add("f4", feats["f4"])
+	add("f4", H.revcomp(feats["f4"]))
+	add("f4", rng.dna(25) + "N" + feats["f4"] + "N" + rng.dna(25))
+	add("f4", rng.dna(15) + "N" + H.revcomp(feats["f4"]) + "N" + rng.dna(40))
 	add("random", rng.dna(80))
 	return out
 
@@ -516,9 +530,6 @@ def batch_lines(stderr):
 	return [(int(m.group(1)), int(m.group(2))) for m in re.finditer(r"mapped (\d+) bp in (\d+) sequences", stderr)]
 
 
-def scratch_path(tmp_path, name):
-	return os.path.join(str(tmp_path), name)
-
 
 def make_edge():
 	"""Contigs with awkward lengths for the .l2b lookups: an empty contig, a 1 bp contig,
@@ -546,7 +557,7 @@ class Tiny(object):
 		self.codes = dict((n, nt4_codes(s)) for n, s in self.reads)
 
 
-def parse_rows(text, tag, nint=None):
+def parse_rows(text, tag):
 	"""Driver output lines starting with tag, split on tabs (tag dropped)."""
 	out = []
 	for line in text.split("\n"):

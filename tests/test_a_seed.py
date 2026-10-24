@@ -10,8 +10,6 @@ through `minibwa map --dbg-seed --dbg-anchor`, which prints the intervals and
 anchors of the mapping path itself.
 """
 
-import os
-
 import pytest
 
 import minibwa_helpers as H
@@ -204,7 +202,7 @@ def _dbg(stderr, ref):
 	(["-k25", "-c", "0.005k"], 25, 5),
 	(["-x", "sr", "-k", "15", "-c", "1"], 15, 1),
 ])
-def test_map_seeds_and_anchors(tiny, threads, args, k, c):
+def test_map_seeds_and_anchors(tiny, args, k, c):
 	"""minibwa map --dbg-seed prints, per read, the seed intervals of the mapping path
 	(start, end, occurrence count): the SMEMs of length >= -k plus the sub-SMEMs (at most 10
 	occurrences); --dbg-anchor prints the anchors after -c sampling and deduplication. Both

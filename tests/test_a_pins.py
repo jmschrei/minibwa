@@ -13,7 +13,6 @@ on base minibwa with MINIBWA_TEST_UPDATE_PINS=1.
 import pytest
 
 import minibwa_helpers as H
-import helpers_a as A
 
 
 def _reads(genome):
@@ -60,7 +59,7 @@ def pin_reads(synth, tmp_path_factory):
 	("a_synth_k12_c2_paf.gz", ["-k", "12", "-c", "2", "-f"]),
 	("a_synth_sr_k21.sam.gz", ["-x", "sr", "-k", "21"]),
 ])
-def test_pinned_map_output(synth, pin_reads, threads, name, args):
+def test_pinned_map_output(synth, pin_reads, name, args):
 	"""Pins the current output of minibwa map on 448 short and 6 long single-end reads (see
 	the module docstring) under several seeding options; every read has one primary record
 	consistent with the genome. The output does not depend on -t."""

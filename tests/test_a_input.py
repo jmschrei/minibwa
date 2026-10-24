@@ -144,29 +144,33 @@ def bseq_batches(lens, names, chunk, min_cnt, max_chunk, frag):
 		out.append(batch)
 
 
-def _batch_reads(seed, n, pairs_every=0):
+def _batch_reads(seed, n, pairs_every=0, fixed=None):
+	"""n records of 1-300 bp (or all `fixed` bp, so that batch sizes hit -K exactly);
+	every pairs_every-th name is a pair with /1 and /2."""
 	rng = H.Rng(seed)
 	recs = []
 	i = 0
 	while len(recs) < n:
-		ln = rng.randint(1, 300)
+		ln = fixed or rng.randint(1, 300)
 		if pairs_every and i % pairs_every == 0:
 			recs.append(("p%d/1" % i, rng.dna(ln)))
-			recs.append(("p%d/2" % i, rng.dna(rng.randint(1, 300))))
+			recs.append(("p%d/2" % i, rng.dna(fixed or rng.randint(1, 300))))
 		else:
 			recs.append(("s%d" % i, rng.dna(ln)))
 		i += 1
 	return recs
 
 
-@pytest.mark.parametrize("chunk,min_cnt,max_chunk,frag", [
-	(1000, 1, 1000, 0), (1000, 5, 3000, 0), (1000, 40000, 2500, 1), (2500, 3, 1000, 1),
-	(0, 1, 0, 0), (0, 1, 0, 1), (1, 1, 1, 1), (100000, 1, 100000, 1),
+@pytest.mark.parametrize("chunk,min_cnt,max_chunk,frag,fixed", [
+	(1000, 1, 1000, 0, None), (1000, 5, 3000, 0, None), (1000, 40000, 2500, 1, None), (2500, 3, 1000, 1, None),
+	(0, 1, 0, 0, None), (0, 1, 0, 1, None), (1, 1, 1, 1, None), (100000, 1, 100000, 1, None),
+	(300, 4, 1000, 0, 100), (300, 4, 1000, 1, 100), (400, 1, 400, 1, 100),
 ])
-def test_bseq_batches(tmp_path, chunk, min_cnt, max_chunk, frag):
+def test_bseq_batches(tmp_path, chunk, min_cnt, max_chunk, frag, fixed):
 	"""mb_bseq_read cuts batches per the rule modelled in bseq_batches(), on single and
-	interleaved paired records; no batch is empty and every record appears once, in order."""
-	recs = _batch_reads(7, 120, pairs_every=3)
+	interleaved paired records, also when a batch reaches -K exactly; no batch is empty
+	and every record appears once, in order."""
+	recs = _batch_reads(7, 120, pairs_every=3, fixed=fixed)
 	path = A.write_reads_fasta(str(tmp_path / "b.fa"), recs)
 	r = H.assert_c_case("drv_a_input", "read", path, chunk, 0, 0, frag, min_cnt, max_chunk)
 	got = _records(r.stdout)
@@ -175,13 +179,13 @@ def test_bseq_batches(tmp_path, chunk, min_cnt, max_chunk, frag):
 	assert [x[2] for b in got for x in b] == [s for _, s in recs]
 
 
-@pytest.mark.parametrize("chunk", [0, 1, 700, 5000, 10 ** 9])
-def test_bseq_read_frag(tmp_path, chunk):
+@pytest.mark.parametrize("chunk,fixed", [(0, None), (1, None), (700, None), (5000, None), (10 ** 9, None), (400, 100)])
+def test_bseq_read_frag(tmp_path, chunk, fixed):
 	"""mb_bseq_read_frag reads two files in lockstep, record i of each file adjacent, and ends
-	a batch once it holds at least chunk bases; when one file runs out, the extra records
-	of the other are dropped and reading stops."""
-	r1 = _batch_reads(8, 40)
-	r2 = _batch_reads(9, 46)
+	a batch once it holds at least chunk bases (exactly chunk included); when one file runs
+	out, the extra records of the other are dropped and reading stops."""
+	r1 = _batch_reads(8, 40, fixed=fixed)
+	r2 = _batch_reads(9, 46, fixed=fixed)
 	f1 = A.write_reads_fasta(str(tmp_path / "1.fa"), r1)
 	f2 = A.write_reads_fasta(str(tmp_path / "2.fa"), r2)
 	r = H.assert_c_case("drv_a_input", "frag", chunk, 0, 0, f1, f2)
@@ -234,14 +238,14 @@ def test_map_K_batches_single_file(tiny, tmp_path):
 
 def test_map_K_batches_two_files(tiny, tmp_path):
 	"""With two read files, a batch ends once its pairs hold at least NUM1 bases."""
-	pairs = _batch_reads(11, 30)
+	pairs = [("f" + n, x) for n, x in _batch_reads(12, 10, fixed=100)] + _batch_reads(11, 20)
 	r1 = [(n, s) for n, s in pairs]
 	r2 = [(n, H.revcomp(s)) for n, s in pairs]
 	f1 = A.write_reads_fasta(str(tmp_path / "1.fa"), r1)
 	f2 = A.write_reads_fasta(str(tmp_path / "2.fa"), r2)
-	for k in (1, 800, 2500):
+	for k in (1, 800, 2500, 400):
 		r = H.run_map(tiny.index, [f1, f2], ["-K", k])
-		want, cur, size = [], [0, 0], 0
+		want, cur = [], [0, 0]
 		for n, s in pairs:
 			cur = [cur[0] + 2 * len(s), cur[1] + 2]
 			if cur[0] >= k:

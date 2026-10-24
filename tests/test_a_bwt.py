@@ -8,7 +8,6 @@ cache, SA), l2bit.c lookups, kom_nt4_table, and the `getref` and `bench`
 subcommands.
 """
 
-import os
 import re
 import shutil
 
