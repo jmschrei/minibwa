@@ -315,3 +315,64 @@ the public API.
   RR-only) library the pairs from reverse-strand fragments are never proper
   (known-bugs/r2-same-strand-orientation-labels.md). FR and RF libraries are
   not affected.
+
+## Coverage
+
+Line coverage of one run of the whole suite (450 tests, `MINIBWA_TEST_THREADS=4`)
+on a copy of base minibwa built with `CC="gcc --coverage"` and `-O0` (gcc 13,
+measured with gcovr 8.7). "CLI tests" counts what the `minibwa` processes
+executed, "C drivers" what the drivers in `c/` executed (the two were kept
+apart with `GCOV_PREFIX`), and "Both" their union. The mapping-path files
+are minibwa's own sources reached by `minibwa map`, `minibwa mem`, the API
+and the debugging subcommands; `bwt.c` and `l2bit.c` also hold
+index-building code, which runs whenever a test builds an index. ksw2 and
+mimalloc are vendored and listed separately; mimalloc is linked only into
+the binary. `kseq.h` and `kalloc.h` hold only macros and declarations.
+
+| File | CLI tests | C drivers | Both |
+|:-----|----------:|----------:|-----:|
+| `seed.c` | 90.1% (210/233) | 98.3% (229/233) | 99.1% (231/233) |
+| `bwt.c` | 91.3% (409/448) | 82.1% (368/448) | 92.4% (414/448) |
+| `l2bit.c` | 82.2% (277/337) | 49.0% (165/337) | 82.8% (279/337) |
+| `lchain.c` | 99.3% (136/137) | 98.5% (135/137) | 99.3% (136/137) |
+| `map-algo.c` | 84.6% (427/505) | 95.4% (482/505) | 99.4% (502/505) |
+| `align.c` | 97.4% (668/686) | 75.1% (515/686) | 97.4% (668/686) |
+| `pe.c` | 98.8% (422/427) | 71.4% (305/427) | 98.8% (422/427) |
+| `cs.c` | 91.7% (111/121) | 100.0% (121/121) | 100.0% (121/121) |
+| `format.c` | 96.1% (245/255) | 62.0% (158/255) | 96.5% (246/255) |
+| `options.c` | 100.0% (90/90) | 100.0% (90/90) | 100.0% (90/90) |
+| `map-main.c` | 99.8% (502/503) | 0.0% (0/503) | 99.8% (502/503) |
+| `bseq.c` | 96.9% (94/97) | 94.8% (92/97) | 97.9% (95/97) |
+| `kommon.c` | 84.4% (103/122) | 79.5% (97/122) | 90.2% (110/122) |
+| `kthread.c` | 100.0% (68/68) | 100.0% (68/68) | 100.0% (68/68) |
+| `kalloc.c` | 78.9% (90/114) | 78.9% (90/114) | 78.9% (90/114) |
+| `main.c` | 99.2% (132/133) | 0.0% (0/133) | 99.2% (132/133) |
+| `fastmap.c` | 100.0% (111/111) | 0.0% (0/111) | 100.0% (111/111) |
+| `bwt.h` | 100.0% (6/6) | 100.0% (6/6) | 100.0% (6/6) |
+| `l2bit.h` | 100.0% (4/4) | 100.0% (4/4) | 100.0% (4/4) |
+| `mbpriv.h` | 65.8% (25/38) | 100.0% (38/38) | 100.0% (38/38) |
+| `kommon.h` | 100.0% (5/5) | 100.0% (5/5) | 100.0% (5/5) |
+| `bseq.h` | 77.8% (7/9) | 100.0% (9/9) | 100.0% (9/9) |
+| `ksw2_extz2_sse.c` | 88.5% (154/174) | 100.0% (174/174) | 100.0% (174/174) |
+| `ksw2_extd2_sse.c` | 94.2% (212/225) | 99.1% (223/225) | 100.0% (225/225) |
+| `ksw2_ll_sse.c` | 94.0% (188/200) | 94.0% (188/200) | 94.0% (188/200) |
+| `ksw2.h` | 90.1% (64/71) | 94.4% (67/71) | 94.4% (67/71) |
+| **mapping-path .c (17 files)** | 93.3% (4095/4387) | 66.4% (2915/4387) | 96.1% (4217/4387) |
+| **their headers** | 75.8% (47/62) | 100.0% (62/62) | 100.0% (62/62) |
+| **ksw2 (vendored)** | 92.2% (618/670) | 97.3% (652/670) | 97.6% (654/670) |
+| **mimalloc (vendored)** | 47.2% (2125/4501) | 0.0% (0/4501) | 47.2% (2125/4501) |
+
+Lines no test reaches in the mapping path include: the `CG:B:I` branch of
+`write_sam_cigar` (format.c:177-183, no caller sets it), the demotion of a
+second primary overlapping the paired hit (pe.c:550-553), `mb_bseq_eof`
+(no callers), closing already opened read files when a later one fails
+(map-main.c:268), the failure path of `l2b_load_mmap`, and index-side code:
+`mb_bwt_gen_sa` and `mb_bwt_load_raw` (bwt.c; the index is built through
+libsais) and `l2b_save_pac`/`l2b_save_pac_meth` (l2bit.c).
+
+Public names in `minibwa.h` that no test refers to: `MB_CIGAR_SOFTCLIP`,
+`MB_CIGAR_HARDCLIP`, `MB_CIGAR_N_SKIP` and `MB_CIGAR_PADDING` (no hit's
+CIGAR holds these operations; clips follow from `qs`/`qe`), the flag name
+`MB_F_NO_KALLOC` (its effect is tested through `--kalloc` and
+`mb_tbuf_init(no_kalloc)`), and the opaque struct tags `mb_idx_s` and
+`mb_tbuf_s`. Every function declared there is called by a C driver.
