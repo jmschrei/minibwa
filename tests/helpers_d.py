@@ -171,6 +171,9 @@ def mixed_reads(genome, seed=41):
 		sb = "-" if i % 4 < 2 else "+"
 		a = genome.fetch(ca, pa, pa + la, sa)
 		b = genome.fetch(cb, pb, pb + lb, sb)
+		if i % 2 == 0:  # an ambiguous base in each part, so the NM in SA:Z must count it
+			a = a[:25] + "N" + a[26:]
+			b = b[:25] + "N" + b[26:]
 		add("ch%d" % i, a + b, "chimeric", "XX:i:%d" % i if i % 2 else None,
 			parts=[(0, la, ca, pa, sa), (la, 150, cb, pb, sb)])
 	for i in range(3):

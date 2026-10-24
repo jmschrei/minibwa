@@ -174,8 +174,9 @@ def test_seq_qual_and_clipping(mixed):
 def test_sa_tag(mixed):
 	"""Every non-secondary record of a read with several non-secondary records carries SA:Z listing the
 	others in output order as rname,pos,strand,CIGAR,mapQ,NM; with CIGAR = 5' clip S, min(query, ref span)
-	M, the excess as I or D, 3' clip S (SAM spec). Reads with one such record carry no SA:Z."""
-	n = 0
+	M, the excess as I or D, 3' clip S (SAM spec). Reads with one such record carry no SA:Z. Half the
+	chimeric reads carry an N in each part, which NM counts."""
+	n = n_nm = 0
 	for run in ("default", "Y"):
 		for name, recs in mixed.sams[run].by_qname().items():
 			main = [r for r in recs if not r.is_secondary and not r.is_unmapped]
@@ -184,9 +185,11 @@ def test_sa_tag(mixed):
 				if r.is_secondary or len(main) < 2:
 					assert "SA" not in r.tags, r.line[:150]
 					continue
-				assert D.parse_sa(r.tags["SA"]) == D.expected_sa(main, r, qlen), r.line[:200]
+				sa = D.parse_sa(r.tags["SA"])
+				assert sa == D.expected_sa(main, r, qlen), r.line[:200]
 				n += 1
-	assert n >= 32
+				n_nm += sum(e[5] > 0 for e in sa)
+	assert n >= 32 and n_nm >= 8
 
 
 def test_tags_from_alignment(synth, mixed):
