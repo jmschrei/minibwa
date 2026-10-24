@@ -35,7 +35,6 @@ static int case_sprintf_lite(int argc, char *argv[])
 	char want[4096], *big;
 	size_t i, j, total = 0;
 	int64_t len;
-	void *km;
 	(void)argc, (void)argv;
 	for (i = 0; i < sizeof(ints) / sizeof(ints[0]); ++i) {
 		s.l = 0;
@@ -87,16 +86,12 @@ static int case_sprintf_lite(int argc, char *argv[])
 	}
 	MBT_CHECK_INT(s.l, ==, total);
 	MBT_CHECK(s.l == total && memcmp(s.s, big, total) == 0 && s.s[s.l] == 0);
-	// km_sprintf_lite with and without a kalloc pool
-	km = km_init();
-	for (i = 0; i < 2; ++i) {
-		void *k = i == 0? 0 : km;
-		t.s = 0, t.l = t.m = 0;
-		km_sprintf_lite(k, &t, "%s:%d-%ld", "ctg", 5, 6000000000L);
-		MBT_CHECK_STR(t.s, "ctg:5-6000000000");
-		if (k == 0) free(t.s); // with a pool, the string is in the pool (HAVE_KALLOC) or leaked here
-	}
-	km_destroy(km);
+	// km_sprintf_lite without a kalloc pool (with one, where the string lives depends on whether
+	// the library was built with HAVE_KALLOC, which a driver cannot tell, so it could not be freed)
+	t.s = 0, t.l = t.m = 0;
+	km_sprintf_lite(0, &t, "%s:%d-%ld", "ctg", 5, 6000000000L);
+	MBT_CHECK_STR(t.s, "ctg:5-6000000000");
+	free(t.s);
 	free(big);
 	free(s.s);
 	return 0;

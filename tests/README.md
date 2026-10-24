@@ -22,7 +22,28 @@ python3 -m pytest tests -k pilot                 # a subset
 
 The first run builds minibwa with the Makefile's own flags in a cache
 directory (about 3 s); later runs reuse the build until a source file or the
-compiler changes. Nothing is written to the source tree.
+compiler changes. Nothing is written to the source tree: minibwa processes
+run in a temporary working directory.
+
+### Compilers
+
+`CC` selects the compiler for the build and for the C drivers, for example
+`CC=gcc-11` or `CC=clang`. A clang installed in a conda environment (as
+clang 18 was for the suite's own runs) does not find its zlib and OpenMP
+runtime by itself; point the compiler, the linker and the loader at the
+environment:
+
+```sh
+E=/path/to/conda/env    # holds bin/clang, include/zlib.h, lib/libz.so, lib/libomp.so
+CC=$E/bin/clang CPATH=$E/include LIBRARY_PATH=$E/lib LD_LIBRARY_PATH=$E/lib \
+	python3 -m pytest tests
+```
+
+`CPATH` and `LIBRARY_PATH` are read by the compiler for headers and
+libraries (`zlib.h`, `-lz`, `-fopenmp`), and `LD_LIBRARY_PATH` lets the
+built `minibwa` and the drivers load `libz.so` and `libomp.so` at run time.
+For the suite's runs `E` was
+`/home/jmschrei/auto-optimization/2026-10-24-chromap-speed/toolchains/clang`.
 
 | Variable | Default | Meaning |
 |:---------|:--------|:--------|
@@ -42,7 +63,11 @@ point `MINIBWA_TEST_SRC_DIR` at it (and leave `MINIBWA_BIN` unset, or set it
 to that tree's binary). The build cache is keyed by a hash of the Makefile,
 the top-level `*.c`/`*.h` files, `mimalloc/` and the compiler's path and
 version, and builds hold a file lock, so parallel workers and concurrent runs
-are safe. Child processes run with `LC_ALL=C` and core dumps disabled.
+are safe. Child processes run with `LC_ALL=C`, in a fresh temporary working
+directory unless a test passes `cwd=`, and with the core-file limit at 1
+byte: no core is written, and on Linux a crash handler named in
+`core_pattern` (such as apport, about a second per abort) is skipped, which
+a limit of 0 would not do.
 
 ## Layout
 
@@ -90,11 +115,16 @@ suffix=False)`, `write_interleaved(path, pairs)`, `fastx_text`,
 `(name, seq[, qual[, comment]])` tuples.
 
 Running: `index_genome(fa_or_genome, dir, meth=False)`;
-`run_map(index, reads, args=(), threads=None, check=True)` and
-`run_minibwa(argv)` return a `Result` with `.returncode .stdout .stderr
-.stdout_bytes .sam() .paf() .check()`. `run_map` adds `-t
+`run_map(index, reads, args=(), threads=None, check=True, cwd=None)` and
+`run_minibwa(argv, cwd=None)` return a `Result` with `.returncode .stdout
+.stderr .stdout_bytes .sam() .paf() .check()`. `run_map` adds `-t
 $MINIBWA_TEST_THREADS` unless `threads=` or a `-t N`/`-tN` argument is
-given. Use `run_map(..., subcommand="mem")` for `minibwa mem`.
+given, and makes the index and read paths absolute. Both run the process
+in a new temporary directory (removed afterwards) unless `cwd` is given,
+so give other paths in `args` (such as `-o`) as absolute paths. Use
+`run_map(..., subcommand="mem")` for `minibwa mem`. A process that aborts
+returns `-6` without a core dump or crash-handler delay; no wrapper is
+needed.
 
 Parsing: `parse_sam(text, strict=True)` -> `SamFile` (`.hd .sq .rg .pg .co
 .records .by_qname() .primaries()`); `SamRecord` fields `qname flag rname
@@ -127,9 +157,16 @@ and `sam_body(sam)` all header lines.
 3. End the file with a `{name, function}` table terminated by `{0, 0}` and
    `MBT_MAIN(table)`.
 4. From Python: `H.assert_c_case("drv_<...>", "case", arg1, ...)` compiles
-   the driver if needed (`$CC -std=gnu99 -O2 ... libminibwa.a -lz -lm
-   -lpthread`), runs it and fails with its output unless every check passed.
-   `H.c_cases(driver)` lists the cases.
+   the driver if needed (`$CC -std=gnu99 -O2 ... libminibwa.a
+   libmbt_extra.a -lz -lm -lpthread`), runs it and fails with its output
+   unless every check passed. `H.c_cases(driver)` lists the cases.
+
+`libminibwa.a` lacks some objects that `make minibwa` builds; the harness
+archives `bseq.o` (`mb_bseq_*`) and `kthread.o` (`kt_for`, `kt_pipeline`)
+from the same build into `libmbt_extra.a`, so a driver can call them
+through `bseq.h` and `kthread.h` without including the `.c` file. Being an
+archive, it adds only the members a driver needs, so a driver that does
+include a `.c` file still links. `make` itself is not changed.
 
 Each failed check prints `not ok N - file:line: message`; a run ends with
 `# mbt: CASE checks=N failures=M`. Pass inputs (index prefixes, FASTA files,
@@ -169,7 +206,12 @@ style (tabs, C99).
 * The `@PG` line carries `VN:` (`MB_VERSION`) and `CL:` with the full
   command line, including temporary paths. Compare or pin `strip_pg(text)`.
 * stderr carries timings, CPU use, peak RSS and insert-size statistics.
-  Never compare stderr wholesale; match the specific message.
+  Never compare stderr wholesale; match the specific message. The timing
+  lines (`[M::...] mapped ...`, `Real time`) and the hidden `--dbg-*`
+  traces are not asserted. The insert-size report of `mb_pestat` is
+  undocumented, so `helpers_c.stderr_pestat` reads only its numbers (four
+  candidate counts; quartiles, mean and standard deviation; bounds and
+  percentages per orientation), not its wording.
 * Output is byte-identical for every `-t` at a fixed `-K` (checked at
   `-t 1, 2, 4, 8` on the chrM data). For paired-end input whose insert size is
   inferred, the statistics are computed per batch, so `-K` changes the
