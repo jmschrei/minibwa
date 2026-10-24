@@ -10,9 +10,7 @@
 #include <stdio.h>
 #include "mbpriv.h"
 #include "minibwa_test.h"
-/* bseq.o is part of the minibwa binary but not of libminibwa.a, which the
- * harness links drivers against, so compile the tree's bseq.c in here */
-#include "bseq.c"
+#include "bseq.h" // bseq.o comes from the harness's extra archive (it is not in libminibwa.a)
 
 static void print_rec(const mb_bseq1_t *r)
 { // the comment goes last because it may contain tabs
@@ -227,7 +225,7 @@ static int case_subbatch(int argc, char *argv[])
 			free_hits(s.n, n_hit, h);
 		}
 	free_hits(s.n, n_ref, ref);
-	free(n_hit);
+	free(n_ref); free(n_hit);
 	mbt_free_seqs(&s);
 	mb_idx_destroy(idx);
 	return 0;

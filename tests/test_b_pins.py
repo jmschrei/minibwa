@@ -13,14 +13,17 @@ import minibwa_helpers as H
 @pytest.fixture(scope="module")
 def pin_inputs(synth, tmp_path_factory):
 	"""Short reads (50-320 bp, substitutions, indels up to 10 bp, N), chimeric reads (two
-	loci) and accurate long reads (330 bp - 6 kbp) on the standard synthetic genome."""
+	loci), accurate long reads (330 bp - 6 kbp) and noisier long reads (0.8-3 kbp, 3%
+	substitutions and 2% indels up to 30 bp, which exercise the long-read end clean-up in
+	mm_fix_bad_ends) on the standard synthetic genome."""
 	g = synth.genome
 	d = tmp_path_factory.mktemp("b_pins")
 	se = H.simulate_reads(g, 300, length=(50, 320), seed=61, sub_rate=0.02, indel_rate=0.004, max_indel=10, n_rate=0.002)
 	chim = [p.r1 for p in H.simulate_hic_pairs(g, 40, read_length=150, seed=63, chimeric_frac=1.0, unique=False, name_prefix="c")]
 	lr = H.simulate_long_reads(g, 40, length=(330, 6000), seed=62, sub_rate=0.01, indel_rate=0.004, max_indel=12)
+	noisy = H.simulate_long_reads(g, 200, length=(800, 3000), seed=77, sub_rate=0.03, indel_rate=0.02, max_indel=30)
 	return dict(se=H.write_fastq(str(d / "se.fq"), se + chim), lr=H.write_fastq(str(d / "lr.fq"), lr + _structural_reads(g)),
-		ends=H.write_fastq(str(d / "ends.fq"), _end_indel_reads(g)))
+		ends=H.write_fastq(str(d / "ends.fq"), _end_indel_reads(g)), noisy=H.write_fastq(str(d / "noisy.fq"), noisy))
 
 
 def _end_indel_reads(g):
@@ -89,6 +92,7 @@ PINS = [
 	("b_end_indels.sam.gz", "ends", ["-b", "cs"]),
 	("b_end_indels_scores.paf.gz", "ends", ["-f", "-O", "6,20", "-E", "3,1", "-B", "6", "-w", "20"]),
 	("b_lr_chain_only.paf.gz", "lr", ["--chain-only"]),
+	("b_lr_noisy.paf.gz", "noisy", ["-f"]),
 ]
 
 

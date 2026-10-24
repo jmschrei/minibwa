@@ -2,10 +2,11 @@
 
 The tiny genome (helpers_a.make_tiny) is small enough to sort every suffix of
 the indexed text T = F + revcomp(F) in Python, so ranks, SA values, SA
-intervals, the 10-mer cache and the .l2b contig lookups are checked against
-values derived from the FASTA alone. Covers bwt.c lookups (rank, extension,
-cache, SA), l2bit.c lookups, kom_nt4_table, and the `getref` and `bench`
-subcommands.
+intervals and the .l2b contig lookups are checked against values derived
+from the FASTA alone. Covers bwt.c lookups (rank, extension,
+SA), l2bit.c lookups, kom_nt4_table, and the `getref` and `bench`
+subcommands. The 10-mer cache is checked through the SMEMs found with it
+(test_a_seed.py); its table layout is not pinned.
 """
 
 import re
@@ -30,7 +31,7 @@ def edge(index_of, tmp_path_factory):
 
 
 # ---------------------------------------------------------------------------
-# BWT: occurrence counts, SA, bidirectional extension, k-mer cache
+# BWT: occurrence counts, SA, bidirectional extension
 # ---------------------------------------------------------------------------
 
 
@@ -84,31 +85,11 @@ def test_extension_of_every_short_pattern(tiny):
 	assert 0 < n_absent < 1024  # the test needs both kinds
 
 
-def test_kmer_cache(tiny):
-	"""mb_bwt_cache(4) stores, at index sum(base_i << 2i), the interval of every 4-mer as in
-	the naive suffix array. mb_bwt_cache(10), the cache minibwa map builds at index load,
-	agrees with base-by-base backward search for all 4^10 10-mers (checked in C), and its
-	occurrence counts sum to the number of 10-mer positions in T."""
-	ref = tiny.ref
-	r = H.assert_c_case("drv_a_bwt", "cache", tiny.index + ".mbw", 4, 1)
-	rows = A.parse_rows(r.stdout, "K")
-	assert len(rows) == 256
-	for z, x0, x1, size in rows:
-		z = int(z)
-		kmer = "".join("ACGT"[z >> 2 * i & 3] for i in range(4))
-		w = ref.bi_interval(kmer)
-		assert int(size) == w[2], kmer
-		if w[2]:
-			assert (int(x0), int(x1)) == w[:2], kmer
-	assert A.parse_rows(r.stdout, "O") == [[str(ref.n - 3)]]
-	r = H.assert_c_case("drv_a_bwt", "cache", tiny.index + ".mbw", 10, 0)
-	assert A.parse_rows(r.stdout, "O") == [[str(ref.n - 9)]]
-
-
 def test_index_loading_and_failures(tiny, tmp_path):
 	"""mb_bwt_load and l2b_load read a good index and return NULL for a missing file, a file
 	of the other kind or a file of junk, and so does mb_idx_load for a missing prefix;
-	minibwa map aborts with an error when the .mbw is missing or is not an .mbw."""
+	minibwa map fails with a message and no output when the .mbw is missing or is not an
+	.mbw."""
 	bad = str(tmp_path / "bad.bin")
 	with open(bad, "wb") as f:
 		f.write(b"not an index at all\n")
@@ -119,8 +100,8 @@ def test_index_loading_and_failures(tiny, tmp_path):
 	for mbw in (None, tiny.index + ".l2b"):  # missing, then the wrong magic number
 		if mbw:
 			shutil.copy(mbw, prefix + ".mbw")
-		r = A.run_minibwa_abort(["map", prefix, reads])
-		assert r.returncode != 0 and "failed to load the index" in r.stderr
+		r = H.run_minibwa(["map", prefix, reads])
+		assert r.returncode != 0 and A.warnings(r.stderr) != []
 		assert r.stdout == ""
 
 

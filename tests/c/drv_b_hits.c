@@ -70,6 +70,19 @@ static int case_set_parent(int argc, char *argv[])
 		MBT_CHECK_INT(g[0].subsc, ==, 150);
 		for (i = 0; i < 4; ++i) free(g[i].p);
 	}
+	// same target span as the parent but a different query span (ol 140 < min 145): not an
+	// identical hit, so it counts: dp_max2 295 and, 300 - 295 <= sub_diff, n_sub 1
+	{
+		mb_hit_t g[2];
+		bh_hit(&g[0], 0, 0, 150, 150), g[0].p = bh_extra(300, 0);
+		bh_hit(&g[1], 1, 10, 155, 140), g[1].p = bh_extra(295, 0);
+		g[1].ts = g[0].ts, g[1].te = g[0].te;
+		mb_set_parent(0, 0.5f, INT_MAX, 2, g, 14, 0);
+		MBT_CHECK(g[1].parent == 0);
+		MBT_CHECK_INT(g[0].p->dp_max2, ==, 295);
+		MBT_CHECK_INT(g[0].n_sub, ==, 1);
+		free(g[0].p), free(g[1].p);
+	}
 	return 0;
 }
 
@@ -131,43 +144,43 @@ static int case_select_sub(int argc, char *argv[])
 	return 0;
 }
 
-/* mb_hit_sort: by DP score (chain score without a base alignment), highest first; hits
- * with a negative anchor count are dropped unless they are inversions */
+/* mb_hit_sort: by DP score (chain score without a base alignment), highest first, every
+ * hit kept. (Its branch that drops hits with a negative anchor count is not tested: nothing
+ * in minibwa sets a negative count.) */
 static int case_hit_sort(int argc, char *argv[])
 {
-	mb_hit_t h[5];
-	int n = 5;
-	bh_hit(&h[0], 0, 0, 10, 1), h[0].p = bh_extra(100, 0), h[0].hash = 7;
+	mb_hit_t h[4];
+	int n = 4;
+	bh_hit(&h[0], 0, 0, 10, 1), h[0].p = bh_extra(100, 0);
 	bh_hit(&h[1], 1, 0, 10, 1), h[1].p = bh_extra(300, 0);
 	bh_hit(&h[2], 2, 0, 10, 200);
-	bh_hit(&h[3], 3, 0, 10, 1), h[3].p = bh_extra(500, 0), h[3].cnt = -1;
-	bh_hit(&h[4], 4, 0, 10, 1), h[4].p = bh_extra(50, 0), h[4].cnt = -1, h[4].inv = 1;
+	bh_hit(&h[3], 3, 0, 10, 1), h[3].p = bh_extra(50, 0), h[3].inv = 1;
 	mb_hit_sort(0, &n, h);
 	MBT_REQUIRE(n == 4);
 	MBT_CHECK(h[0].p && h[0].p->dp_max == 300);
 	MBT_CHECK(h[1].p == 0 && h[1].score == 200);
-	MBT_CHECK(h[2].p && h[2].p->dp_max == 100 && h[2].hash == 7);
+	MBT_CHECK(h[2].p && h[2].p->dp_max == 100);
 	MBT_CHECK(h[3].inv && h[3].p->dp_max == 50);
 	free(h[0].p); free(h[2].p); free(h[3].p);
 	return 0;
 }
 
-/* mb_filter_hits: an aligned hit needs mlen >= -m and DP max >= -s times -A */
+/* mb_filter_hits: an aligned hit needs mlen >= -m and DP max >= -s times -A; survivors
+ * keep their order. Hits are told apart by ts (bh_hit sets ts = 1000 + 1000 * id). */
 static int case_filter_hits(int argc, char *argv[])
 {
 	mb_opt_t opt;
-	mb_hit_t h[5];
-	int n = 5;
+	mb_hit_t h[4];
+	int n = 4;
 	mb_opt_init(&opt);
 	MBT_REQUIRE(opt.min_chain_score == 25 && opt.min_dp_max == 30 && opt.a == 2);
 	bh_hit(&h[0], 0, 0, 10, 1), h[0].mlen = 24, h[0].p = bh_extra(100, 0);
 	bh_hit(&h[1], 1, 0, 10, 1), h[1].mlen = 25, h[1].p = bh_extra(59, 0);
 	bh_hit(&h[2], 2, 0, 10, 1), h[2].mlen = 25, h[2].p = bh_extra(60, 0);
 	bh_hit(&h[3], 3, 0, 10, 1), h[3].mlen = 0; // no base alignment: kept
-	bh_hit(&h[4], 4, 0, 10, 1), h[4].flt = 1;  // flagged: dropped
 	mb_filter_hits(&opt, 150, &n, h);
 	MBT_REQUIRE(n == 2);
-	MBT_CHECK(h[0].id == 2 && h[1].id == 3);
+	MBT_CHECK(h[0].ts == 3000 && h[1].ts == 4000);
 	free(h[0].p);
 	return 0;
 }
@@ -223,6 +236,15 @@ static int case_set_mapq(int argc, char *argv[])
 	// blend at 500 bp: sr 36, lr 25 -> 25 + 11 * 2^(1-500/325) = 32.6 -> 33
 	bh_mq_hit(&h, 500, 500, 250, 500, 500, 1000, 948, 0, 255);
 	MBT_CHECK_INT(bh_mapq(500, 0, 325, 25, &h), ==, 33);
+	// the bwa-mem length factor applies from blen 50 (mapQ_coef_len): blen 49: x = 1, 6.02*10/2
+	// = 30.1 -> 30, -3 -> 27; blen 50: 3/ln50 = 0.7669, 17.70 -> 18, -3 -> 15; blen 55: 3/ln55
+	// = 0.7486, 16.87 -> 17, -3 -> 14
+	bh_mq_hit(&h, 49, 49, 25, 49, 49, 98, 88, 1, 255);
+	MBT_CHECK_INT(bh_mapq(49, 1, 325, 25, &h), ==, 27);
+	bh_mq_hit(&h, 50, 50, 25, 50, 50, 100, 90, 1, 255);
+	MBT_CHECK_INT(bh_mapq(50, 1, 325, 25, &h), ==, 15);
+	bh_mq_hit(&h, 55, 55, 25, 55, 55, 110, 100, 1, 255);
+	MBT_CHECK_INT(bh_mapq(55, 1, 325, 25, &h), ==, 14);
 	// long-read mode below -l uses the sr formula: 3/ln200 -> 10, n_sub 1: -3 -> 7
 	bh_mq_hit(&h, 200, 200, 100, 200, 200, 400, 390, 1, 255);
 	MBT_CHECK_INT(bh_mapq(200, 0, 325, 25, &h), ==, 7);

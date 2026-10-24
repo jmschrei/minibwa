@@ -422,11 +422,12 @@ def mutate_read(rng, s, sub_rate=0.02, indel=True):
 
 
 def tiny_reads(contigs, feats, ref):
-	"""~170 reads that exercise seeding on the tiny genome: simulated reads from both
+	"""~180 reads that exercise seeding on the tiny genome: simulated reads from both
 	strands, repeat copies, junctions between contigs and between the strands of the text,
-	N and IUPAC bases in reads, lowercase reads, reads through reference N runs (taken from
-	the text, which has random bases there), homopolymer and dinucleotide reads, and reads
-	shorter than a seed. Returns [(name, seq)]."""
+	reads running past the start and the end of the text, N and IUPAC bases in reads,
+	lowercase reads, reads through reference N runs (taken from the text, which has random
+	bases there), homopolymer and dinucleotide reads, odd-length SMEMs with a sub-SMEM of
+	exactly half their length, and reads shorter than a seed. Returns [(name, seq)]."""
 	rng = H.Rng(4242)
 	g = dict(contigs)
 	out = []
@@ -482,6 +483,21 @@ def tiny_reads(contigs, feats, ref):
 	add("f4", rng.dna(25) + "N" + feats["f4"] + "N" + rng.dna(25))
 	add("f4", rng.dna(15) + "N" + H.revcomp(feats["f4"]) + "N" + rng.dna(40))
 	add("random", rng.dna(80))
+	# odd-length (41 bp) SMEMs whose sub-SMEM is exactly floor(41/2) = 20 bp long: a unique
+	# flank, then the first 19 bases of a forward copy of F2 (the base before F2 repeats too)
+	for p in (420, 560, 1000, 1650, 1800):
+		add("oddsub", g["t1"][p - 22:p + 19])
+	# past either end of the text T = F + revcomp(F): a base, then the start of T (the start
+	# of t1); the end of T (revcomp of t1's start), then a base. Base minibwa extends a size-1
+	# interval at the sentinel's row by one base that is not there
+	# (known-bugs/a-rank2a-sentinel-row.md, r1-rank2a-text-start.md), so the base next to the
+	# text end is never that one: these reads check everything else about the text ends.
+	bug = ref.bwt_full()[ref.primary() + 1]
+	for c in range(4):
+		if c == bug:
+			continue
+		add("tstart", rng.dna(20) + "ACGT"[c] + T[:60])
+		add("tend", T[-60:] + "ACGT"[3 - c] + rng.dna(20))
 	return out
 
 
@@ -574,23 +590,7 @@ def intervals_by_read(text, tag):
 	return out
 
 
-def _core_limit_one():
-	try:
-		import resource
-		resource.setrlimit(resource.RLIMIT_CORE, (1, 1))
-	except (ImportError, ValueError, OSError):
-		pass
-
-
-def run_minibwa_abort(args, timeout=60):
-	"""Run minibwa for a case expected to abort, with RLIMIT_CORE at 1: unlike 0, that also
-	stops the kernel from piping a core to a crash handler such as apport, which can take a
-	second per abort. Returns minibwa_helpers.Result."""
-	import subprocess
-	import minibwa_build
-	argv = [minibwa_build.minibwa_bin()] + [str(a) for a in args]
-	env = dict(os.environ)
-	env.setdefault("LC_ALL", "C")
-	kw = {"preexec_fn": _core_limit_one} if os.name == "posix" else {}
-	p = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, env=env, **kw)
-	return H.Result(argv, p.returncode, p.stdout, p.stderr)
+def warnings(stderr):
+	"""stderr lines other than minibwa's [M::...] progress lines. Tests check that a warning
+	appears and what it names, not its wording, which no minibwa document fixes."""
+	return [l for l in stderr.splitlines() if l.strip() and not l.startswith("[M::")]

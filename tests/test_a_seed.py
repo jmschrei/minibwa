@@ -26,12 +26,13 @@ def tiny(index_of, tmp_path_factory):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("min_len,min_occ,cache", [(19, 1, 10), (10, 1, 0), (5, 1, 10), (12, 3, 10), (25, 2, 10)])
+@pytest.mark.parametrize("min_len,min_occ,cache", [(19, 1, 10), (10, 1, 0), (5, 1, 10), (12, 3, 10), (25, 2, 10), (15, 1, 4)])
 def test_smem_equals_brute_force(tiny, min_len, min_occ, cache):
 	"""mb_bwt_smem finds exactly the SMEMs of each read (maximal matches occurring at least
 	min_occ times, at least min_len long, not contained in another), with the SA interval of
 	the match and of its reverse complement, over the whole read and over its middle half;
-	N and IUPAC bases in reads break matches. With and without the 10-mer cache. The driver
+	N and IUPAC bases in reads break matches. Without a k-mer cache, with the 10-mer cache
+	minibwa map builds, and with a 4-mer cache (so cached and extended lookups mix). The driver
 	checks that mb_bwt_smem_batch finds the same sets in batches of 1, 3, 50 and 1000
 	entries, with whole reads and middle halves mixed in one batch."""
 	r = H.assert_c_case("drv_a_bwt", "smem", tiny.index + ".mbw", tiny.reads_fa, min_len, min_occ, cache, 1, 3, 50, 1000)
@@ -74,9 +75,12 @@ def test_seed_intervals_equal_brute_force(tiny, min_len, max_sub_occ):
 
 
 def _anchor_rows(text):
-	got = {}
+	"""{read: set of anchors} from the driver's A lines; no anchor may appear twice."""
+	got, n = {}, 0
 	for f in A.parse_rows(text, "A"):
 		got.setdefault(f[0], set()).add((int(f[1]), "+-".index(f[2]), int(f[3]), int(f[4]), int(f[5])))
+		n += 1
+	assert n == sum(len(v) for v in got.values()), "duplicate anchors"
 	return got
 
 
@@ -191,8 +195,11 @@ def _dbg(stderr, ref):
 	sd, ac = {}, {}
 	for f in A.dbg_lines(stderr, "SD"):
 		sd.setdefault(f[0], set()).add((int(f[1]), int(f[2]), int(f[3])))
+	n_ac = 0
 	for f in A.dbg_lines(stderr, "AC"):
 		ac.setdefault(f[0], set()).add((ref.names.index(f[3]), "+-".index(f[2]), int(f[1]), int(f[4]), int(f[5])))
+		n_ac += 1
+	assert n_ac == sum(len(v) for v in ac.values()), "duplicate anchors"  # (seed intervals may repeat)
 	return sd, ac
 
 

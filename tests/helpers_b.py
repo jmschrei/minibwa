@@ -364,6 +364,12 @@ def adap_value(x0, x1, length):
 # ---------------------------------------------------------------------------
 
 
+def warnings(stderr):
+	"""stderr lines other than minibwa's [M::...] progress lines (no document fixes the
+	wording of a warning; tests check only that one appears and what it names)."""
+	return [l for l in stderr.splitlines() if l.strip() and not l.startswith("[M::")]
+
+
 def body_records(res):
 	return res.sam().records
 

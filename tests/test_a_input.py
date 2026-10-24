@@ -165,11 +165,13 @@ def _batch_reads(seed, n, pairs_every=0, fixed=None):
 	(1000, 1, 1000, 0, None), (1000, 5, 3000, 0, None), (1000, 40000, 2500, 1, None), (2500, 3, 1000, 1, None),
 	(0, 1, 0, 0, None), (0, 1, 0, 1, None), (1, 1, 1, 1, None), (100000, 1, 100000, 1, None),
 	(300, 4, 1000, 0, 100), (300, 4, 1000, 1, 100), (400, 1, 400, 1, 100),
+	(1000, 1, 1000, 1, 1200), (3000, 2, 3000, 1, 1500),
 ])
 def test_bseq_batches(tmp_path, chunk, min_cnt, max_chunk, frag, fixed):
 	"""mb_bseq_read cuts batches per the rule modelled in bseq_batches(), on single and
-	interleaved paired records, also when a batch reaches -K exactly; no batch is empty
-	and every record appears once, in order."""
+	interleaved paired records, also when a batch reaches -K exactly and when the records are
+	longer than 1 kbp (a mate is pulled in for any record shorter than 1 Mbp); no batch is
+	empty and every record appears once, in order."""
 	recs = _batch_reads(7, 120, pairs_every=3, fixed=fixed)
 	path = A.write_reads_fasta(str(tmp_path / "b.fa"), recs)
 	r = H.assert_c_case("drv_a_input", "read", path, chunk, 0, 0, frag, min_cnt, max_chunk)
@@ -284,6 +286,52 @@ def test_batching_does_not_change_single_end_output(tiny, tmp_path):
 	assert H.sam_body(two.stdout) == H.sam_body(whole.stdout)
 
 
+def test_subbatch_split_by_length(tiny, tmp_path):
+	"""worker_pipeline also ends a sub-batch once it holds 1 Mbp (sb_len), before it has 24
+	reads: two 600 kbp reads after five short ones end the first sub-batch at seven reads.
+	Every read keeps its records, the same as when each read is its own batch."""
+	rng = H.Rng(99)
+	recs = list(tiny.reads[:5]) + [("long1", rng.dna(600000)), ("long2", rng.dna(600000))] + list(tiny.reads[5:40])
+	fa = A.write_reads_fasta(str(tmp_path / "sb.fa"), recs)
+	whole = H.run_map(tiny.index, fa)
+	assert _batch_stats(whole.stderr) == [(sum(len(x) for _, x in recs), len(recs))]
+	assert [x.qname for x in whole.sam().records if x.is_primary] == [n for n, _ in recs]
+	one = H.run_map(tiny.index, fa, ["-K", "1", "--pe=no"], threads=1)
+	assert len(_batch_stats(one.stderr)) == len(recs)
+	assert H.sam_body(one.stdout) == H.sam_body(whole.stdout)
+
+
+def test_mates_use_their_own_length(synth, tmp_path):
+	"""Adaptive parameters (mb_opt_adap) come from each read's own length, also for the two
+	mates of a pair, which differ in length after adapter trimming. With -w 5 a 150 bp read
+	gets a band of 14, too narrow for a 40 bp deletion, so it aligns as two records (as in
+	test_b_scoring.test_bandwidth); its 1400 bp mate gets a band of 192. With pairing off
+	(-P), each mate's records equal those of the same read mapped on its own under the same
+	name (the name seeds the tie-breaking hash)."""
+	g = synth.genome
+	c0, c1 = g.names[0], g.names[1]
+	u = 20000
+	while not g.is_unique(c0, u, u + 200, 50) or g[c0][u + 74] == g[c0][u + 114] or g[c0][u + 75] == g[c0][u + 115]:
+		u += 1
+	v = 10000
+	while not g.is_unique(c1, v, v + 1400, 50):
+		v += 100
+	m1 = g[c1][v:v + 1400]
+	m2 = H.revcomp(g[c0][u:u + 75] + g[c0][u + 115:u + 190])  # 150 bp, a 40 bp deletion
+
+	def recs(sam, mask):
+		return sorted((x.rname, x.pos0, x.cigar.replace("H", "S"), x.flag & 0x910, x.mapq, x.tags["AS"], x.tags["NM"])
+			for x in sam.records if x.flag & 0xC0 == mask)
+
+	pe = H.run_map(synth.index, A.write_reads_fasta(str(tmp_path / "pe.fa"), [("m/1", m1), ("m/2", m2)]), ["-w", "5", "-P"]).sam()
+	se1 = H.run_map(synth.index, A.write_reads_fasta(str(tmp_path / "s1.fa"), [("m", m1)]), ["-w", "5"]).sam()
+	se2 = H.run_map(synth.index, A.write_reads_fasta(str(tmp_path / "s2.fa"), [("m", m2)]), ["-w", "5"]).sam()
+	assert sorted((x.pos0, x.cigar.replace("H", "S")) for x in se2.records) == [(u, "75M75S"), (u + 115, "75S75M")]
+	assert recs(se1, 0) == [(c1, v, "1400M", 0, 60, 2800, 0)]
+	assert recs(pe, 0x40) == recs(se1, 0)
+	assert recs(pe, 0x80) == recs(se2, 0)
+
+
 def test_subbatch_limits_do_not_change_hits(tiny):
 	"""mb_map_batch gives every read the same hits for any sub-batch limits (sb_seq 1-1000
 	reads, sb_len 1 bp-1 Mbp) as with the defaults and as mb_map one read at a time."""
@@ -339,9 +387,9 @@ def test_input_forms_give_the_same_output(tiny, pe):
 
 def test_read_grouping_and_name_trimming(tiny, tmp_path):
 	"""In one input file, adjacent reads with the same name (ignoring a /<digit> suffix) form
-	a pair (flags 0x1, 0x40/0x80) and lose differing /1 /2 suffixes in QNAME; other reads
-	stay single with their names as given; mixed single and paired reads work; with
-	--pe=no nothing is paired."""
+	a pair (flags 0x1, 0x40/0x80) and lose differing /1 /2 suffixes in QNAME, also when a
+	batch holds only one pair (-K 1); other reads stay single with their names as given;
+	mixed single and paired reads work; with --pe=no nothing is paired."""
 	g = dict(tiny.contigs)
 	t1 = g["t1"]
 	recs = [
@@ -355,9 +403,13 @@ def test_read_grouping_and_name_trimming(tiny, tmp_path):
 	fa = A.write_reads_fasta(str(tmp_path / "g.fa"), recs)
 	sam = H.run_map(tiny.index, fa).sam()
 	got = [(x.qname, x.flag & 0xC1) for x in sam.records if x.is_primary]
-	assert got == [("pa", 0x41), ("pa", 0x81), ("single/1", 0), ("pb", 0x41), ("pb", 0x81),
+	want = [("pa", 0x41), ("pa", 0x81), ("single/1", 0), ("pb", 0x41), ("pb", 0x81),
 		("pc/1", 0x41), ("pc/1", 0x81), ("lone", 0), ("pd", 0x41), ("pd", 0x81)]
+	assert got == want
 	assert H.pair_invariant_errors(sam) == []
+	# -K 1: every batch holds a single pair (a read is read ahead to find its mate)
+	sam = H.run_map(tiny.index, fa, ["-K", "1"]).sam()
+	assert [(x.qname, x.flag & 0xC1) for x in sam.records if x.is_primary] == want
 	sam = H.run_map(tiny.index, fa, ["--pe=no"]).sam()
 	assert [(x.qname, x.flag & 0xC1) for x in sam.records if x.is_primary] == [(n, 0) for n, _ in recs]
 
@@ -374,7 +426,7 @@ def test_two_files_pair_by_position_and_name(tiny, tmp_path):
 	res = H.run_map(tiny.index, [f1, f2])
 	got = [(x.qname, x.flag & 0xC1) for x in res.sam().records if x.is_primary]
 	assert got == [("x", 0x41), ("x", 0x81), ("y", 0), ("w", 0), ("z", 0x41), ("z", 0x81)]
-	assert "different number of records" in res.stderr
+	assert A.warnings(res.stderr) != []
 
 
 def test_copy_comment(tiny, tmp_path):
@@ -411,22 +463,22 @@ def test_copy_comment(tiny, tmp_path):
 
 def test_parse_warnings(tiny, tmp_path):
 	"""A FASTQ record whose quality is shorter than its sequence stops reading with a
-	warning naming the record before it (or the first record); reads before it are mapped.
-	An empty read name draws a warning."""
+	warning naming the record before it (or a warning when it is the first record); reads
+	before it are mapped. An empty read name draws a warning. (The wording is not checked.)"""
 	t1 = dict(tiny.contigs)["t1"]
 	good = "".join("@g%d\n%s\n+\n%s\n" % (i, t1[100 * i:100 * i + 80], "I" * 80) for i in range(1, 4))
 	path = str(tmp_path / "bad.fq")
 	with open(path, "w") as f:
 		f.write(good + "@bad\nACGTACGT\n+\nIII\n")
 	r = H.run_map(tiny.index, path, ["--pe=no"])
-	assert "failed to parse the FASTA/FASTQ record next to 'g3'" in r.stderr
+	assert any("'g3'" in l for l in A.warnings(r.stderr))
 	assert [x.qname for x in r.sam().records if x.is_primary] == ["g1", "g2", "g3"]
 	with open(path, "w") as f:
 		f.write("@bad\nACGTACGT\n+\nIII\n")
 	r = H.run_map(tiny.index, path)
-	assert "failed to parse the first FASTA/FASTQ record" in r.stderr
+	assert A.warnings(r.stderr) != [] and H.sam_body(r.stdout) == ""
 	with open(path, "w") as f:
 		f.write(">\n%s\n>named\n%s\n" % (t1[100:200], t1[300:400]))
 	r = H.run_map(tiny.index, path, ["-f"])
-	assert "empty sequence name" in r.stderr
+	assert A.warnings(r.stderr) != []
 	assert [l.split("\t")[0] for l in r.stdout.split("\n") if l][-1] == "named"

@@ -83,7 +83,10 @@ def test_cigar_structure(synth, se, lr, which):
 def test_alignment_scores(synth, se, lr, which):
 	"""AS is the score of the reported alignment under the default scoring (match 2,
 	mismatch -8, N -1, gap min(12+2l, 23+l)); ms is its best-scoring segment with gap cost
-	q+e (short reads) or q+e*log2(1+l) (long reads); 0 <= md <= ms."""
+	q+e (short reads) or q+e*log2(1+l) (long reads); 0 <= md <= ms. (AS is the DP score
+	(mb_extra_t.dp_score), which no document ties to the CIGAR: it keeps the cost of an
+	indel that mb_fix_cigar slides to the read start and then drops, as happens to some
+	reads in (CTT)n tracts. None of these reads does that.)"""
 	run = se if which == "se" else lr
 	errs = []
 	n = 0

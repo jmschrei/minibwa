@@ -29,7 +29,7 @@ static uint64_t bc_rand(void)
 
 static int bc_below(int n) { return (int)(bc_rand() % (uint64_t)n); }
 
-static l2b_ctg_t bc_ctg[2] = { { "c0", 0, 100000, 0 }, { "c1", 0, 50000, 100000 } };
+static l2b_ctg_t bc_ctg[2] = { { .name = "c0", .len = 100000, .off = 0 }, { .name = "c1", .len = 50000, .off = 100000 } };
 static l2b_t bc_l2b; // only ctg[].off and ctg[].len are read by the code under test
 
 static void bc_init_l2b(void)
@@ -280,7 +280,7 @@ static int case_lchain_random(int argc, char *argv[])
 			MBT_CHECKF(s == best, "iter %d: the best chain's anchors score %d, reported %d", it, s, best);
 		}
 		bc_free(&c);
-		free(f);
+		free(f); free(a);
 	}
 	return 0;
 }
@@ -310,8 +310,9 @@ static int case_cal_mblen(int argc, char *argv[])
 	return 0;
 }
 
-/* mb_gen_hit: chains become hits sorted by score; coordinates come from the first and
- * last anchors, query coordinates of reverse hits are on the read's forward strand. */
+/* mb_gen_hit: chains become hits sorted by score, without a base alignment; coordinates
+ * come from the first and last anchors, query coordinates of reverse hits are on the read's
+ * forward strand. (The internal id, parent and anchor-offset fields are not checked.) */
 static int case_gen_hit(int argc, char *argv[])
 {
 	bc_chains_t c;
@@ -330,11 +331,8 @@ static int case_gen_hit(int argc, char *argv[])
 	MBT_CHECK(h[0].tid == 0 && h[0].rev == 0 && h[0].ts == 5000 && h[0].te == 5060 && h[0].qs == 0 && h[0].qe == 60);
 	MBT_CHECK(h[1].tid == 0 && h[1].rev == 1 && h[1].ts == 3000 && h[1].te == 3040 && h[1].qs == qlen - 50 && h[1].qe == qlen - 10);
 	MBT_CHECK(h[0].mlen == 60 && h[0].blen == 60 && h[1].mlen == 40 && h[1].blen == 40);
-	for (i = 0; i < 2; ++i) {
-		const mb_anchor_t *p = &c.a[h[i].as];
-		MBT_CHECK(h[i].id == i && h[i].parent == MB_PARENT_UNSET && h[i].p == 0);
-		MBT_CHECKF(p->sid == (int)(h[i].tid<<1 | h[i].rev) && p->tpos + 1 - p->len == h[i].ts, "hit %d: as does not point at its first anchor", i);
-	}
+	for (i = 0; i < 2; ++i)
+		MBT_CHECK(h[i].p == 0);
 	free(h);
 	MBT_CHECK(mb_gen_hit(0, 1, qlen, &bc_l2b, 0, c.u, c.a) == 0);
 	bc_free(&c);
@@ -352,11 +350,12 @@ static void bc_hit_from(mb_hit_t *h, int as, int cnt, int score, int qlen, const
 }
 
 /* mb_split_hit: the first n anchors stay, the rest form a new hit with a proportional
- * share of the score; a split of a primary marks the new hit as a provisional primary. */
+ * share of the score; the piece split off a primary becomes a primary of its own once the
+ * hits are synced (mb_sync_hits), and is not the SAM primary. */
 static int case_split_hit(int argc, char *argv[])
 {
 	mb_anchor_t a[4];
-	mb_hit_t r, r2;
+	mb_hit_t r, r2, hs[2];
 	bc_init_l2b();
 	a[0] = bc_anc(0, 0, 1000, 20), a[1] = bc_anc(0, 20, 1020, 20), a[2] = bc_anc(0, 50, 1060, 20), a[3] = bc_anc(0, 70, 1080, 20);
 	bc_hit_from(&r, 0, 4, 77, 100, a);
@@ -366,10 +365,14 @@ static int case_split_hit(int argc, char *argv[])
 	MBT_CHECK_INT(r2.score, ==, 58); // 77 * 3/4 = 57.75, rounded
 	MBT_CHECK_INT(r.score, ==, 19);
 	MBT_CHECK(r.ts == 1000 && r.te == 1020 && r.qs == 0 && r.qe == 20);
-	MBT_CHECK(r2.ts == 1020 && r2.te == 1100 && r2.qs == 20 && r2.qe == 90 && r2.as == 1);
-	MBT_CHECK(r2.id == -1 && r2.parent == MB_PARENT_TMP_PRI && r2.sam_pri == 0 && r2.p == 0);
+	MBT_CHECK(r2.ts == 1020 && r2.te == 1100 && r2.qs == 20 && r2.qe == 90);
+	MBT_CHECK(r2.sam_pri == 0 && r2.p == 0);
 	MBT_CHECK(r.split == 1 && r2.split == 2);
 	MBT_CHECK(r.mlen == 20 && r2.mlen == 60 && r2.blen == 80);
+	hs[0] = r, hs[1] = r2;
+	mb_sync_hits(0, 2, hs);
+	MBT_CHECK(hs[0].parent == hs[0].id && hs[1].parent == hs[1].id && hs[0].id != hs[1].id);
+	MBT_CHECK(hs[0].sam_pri == 1 && hs[1].sam_pri == 0);
 	bc_hit_from(&r, 0, 4, 80, 100, a); // a secondary keeps its parent; out-of-range n does nothing
 	r.id = 1, r.parent = 0;
 	mb_split_hit(&r, &r2, 2, 100, a, &bc_l2b);
@@ -389,7 +392,8 @@ static int case_split_hit(int argc, char *argv[])
 	return 0;
 }
 
-/* mb_squeeze_a packs the anchors of the remaining hits to the front, in anchor order */
+/* mb_squeeze_a packs the anchors of the remaining hits into the first n slots; each hit
+ * still points at its own anchors, in order (where in [0, n) they go is not checked) */
 static int case_squeeze_a(int argc, char *argv[])
 {
 	mb_anchor_t a[8];
@@ -397,12 +401,14 @@ static int case_squeeze_a(int argc, char *argv[])
 	int i, n;
 	for (i = 0; i < 8; ++i) a[i] = bc_anc(0, i * 10, 1000 + i * 10, 10);
 	memset(h, 0, sizeof(h));
-	h[0].as = 5, h[0].cnt = 2; // anchors 5, 6
-	h[1].as = 1, h[1].cnt = 2; // anchors 1, 2
+	h[0].as = 5, h[0].cnt = 2; // anchors 5, 6 (qpos 59, 69)
+	h[1].as = 1, h[1].cnt = 2; // anchors 1, 2 (qpos 19, 29)
 	n = mb_squeeze_a(0, 2, h, a);
 	MBT_CHECK_INT(n, ==, 4);
-	MBT_CHECK(h[1].as == 0 && h[0].as == 2);
-	MBT_CHECK(a[0].qpos == 19 && a[1].qpos == 29 && a[2].qpos == 59 && a[3].qpos == 69);
+	MBT_REQUIRE(h[0].as >= 0 && h[0].as + 2 <= n && h[1].as >= 0 && h[1].as + 2 <= n);
+	MBT_CHECK(h[0].as + 2 <= h[1].as || h[1].as + 2 <= h[0].as);
+	MBT_CHECK(a[h[0].as].qpos == 59 && a[h[0].as + 1].qpos == 69);
+	MBT_CHECK(a[h[1].as].qpos == 19 && a[h[1].as + 1].qpos == 29);
 	return 0;
 }
 

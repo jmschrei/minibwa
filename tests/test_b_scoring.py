@@ -49,7 +49,9 @@ def test_gap_open_and_extension(bgen, tmp_path):
 	default dual affine min(12+2*30, 23+30) = 53 -> 247; -O 12 -E 2 (one value sets both
 	pairs) 72 -> 228; -O 6,30 -E 3,1: min(96, 60) -> 240; -O 16 -E 2 -> 224.
 	A 1 bp insertion (149 matches): 298 - 14 = 284; -O 6 -E 1: 291; -A 1: 149 - 14 = 135;
-	-A 3: 447 - 14 = 433. ms charges any gap q+e in short-read mode: 300 - 14 = 286."""
+	-A 3: 447 - 14 = 433. ms charges any gap q+e in short-read mode: 300 - 14 = 286.
+	(Pairs with O1 >= O2 or E1 <= E2 are not tested: base minibwa does not apply the
+	documented cost to them, see known-bugs/r1-dual-gap-penalty-order.md.)"""
 	g = bgen["b1"]
 	u = _clean_deletion(g, bgen.unique_start + 1000, 75, 30)
 	s = g[u:u + 75] + g[u + 105:u + 180]
@@ -152,7 +154,7 @@ def test_base_tag_choice(bgen, tmp_path):
 		rec = B.one_record(_map(bgen, tmp_path, s, args))
 		assert rec.tags[tag] == value and not set(rec.tags) & (set(["MD", "cs", "ds"]) - set([tag])), (args, rec.line[:200])
 	res = _map(bgen, tmp_path, s, ("-b", "xyz"))
-	assert "-b only takes 'cs', 'ds' or 'MD'" in res.stderr
+	assert any("-b" in l for l in B.warnings(res.stderr))  # a warning naming -b; wording not checked
 	assert "cs" in B.one_record(res).tags
 
 

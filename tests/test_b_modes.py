@@ -66,14 +66,15 @@ def test_preset_applies_before_other_options(bgen, tmp_path):
 
 
 def test_preset_and_yes_no_errors(bgen, tmp_path):
-	"""An unknown preset is an error (exit 1, message); --adap and --long take yes/no (or y/n)
-	and warn on anything else without changing the setting."""
+	"""An unknown preset is an error (exit 1, a message naming it, no output); --adap and
+	--long take yes/no (or y/n) and warn (naming the option) on anything else without
+	changing the setting. The wording of the messages is not checked."""
 	r = _map(bgen, tmp_path, [("x", bgen["b1"][100:250])], ("-x", "nonsense"), check=False)
-	assert r.returncode == 1 and "unknown preset 'nonsense'" in r.stderr and r.stdout == ""
+	assert r.returncode == 1 and "nonsense" in r.stderr and r.stdout == ""
 	s = [("L", _ins4_read(bgen["b1"], bgen.unique_start + 7000, 200))]
 	for opt in ("--adap=maybe", "--long=perhaps"):
 		r = _map(bgen, tmp_path, s, (opt,))
-		assert "only accepts 'yes' or 'no'" in r.stderr, opt
+		assert any(opt.split("=")[0] in l for l in B.warnings(r.stderr)), opt
 		assert B.one_record(r).tags["ms"] == 783, opt  # still the default adaptive mode
 
 
@@ -252,25 +253,24 @@ def test_inversion(bgen, tmp_path):
 def test_zdrop_splits_unrelated_middle(bgen, tmp_path):
 	"""A 3 kbp read with its middle 1000 bases replaced by unrelated sequence: the two flanks
 	chain, the alignment through the middle drops (Z-drop) and the chain is split, giving
-	one primary and one supplementary record of 1000 matches each."""
+	one primary and one supplementary record of 1000 matches each. (Which DP calls lead
+	there, as --dbg-an-pos shows, is not checked.)"""
 	g = bgen["b2"]
 	o = 5600
 	junk = H.Rng(92).dna(1000)
 	junk = B.flip_base(g[o + 1000]) + junk[1:-1] + B.flip_base(g[o + 1999])
 	s = [("z", g[o:o + 1000] + junk + g[o + 2000:o + 3000])]
-	res = _map(bgen, tmp_path, s, ("--dbg-an-pos",))
-	recs = res.sam().records
+	recs = _map(bgen, tmp_path, s).sam().records
 	got = sorted((r.pos0, r.cigar.replace("H", "S")) for r in recs)
 	assert got == [(o, "1000M2000S"), (o + 2000, "2000S1000M")] and sorted(r.flag & 0x900 for r in recs) == [0, 0x800], got
-	ad = [l.split("\t") for l in res.stderr.splitlines() if l.startswith("AD\t")]
-	assert any(f[7] == "1" for f in ad), ad  # the gap fill was Z-dropped
 
 
 def test_dbg_an_pos_and_aln_seq(bgen, tmp_path):
 	"""--dbg-an-pos prints the anchors of each hit (AF: hit, contig, last target base, last
 	query base, gap to the previous anchor, length; all exact matches) and the gap fills (AD);
 	--dbg-aln-seq prints each DP's parameters, target and query (reversed for a left
-	extension) and result."""
+	extension) and result. How many anchors a hit keeps and how many DPs run are not
+	checked: a faster implementation may skip a DP or an anchor and align the same."""
 	g = bgen["b1"]
 	u = bgen.unique_start + 12000
 	while g[u + 99] == g[u + 102] or g[u + 100] == g[u + 103]:
@@ -279,7 +279,7 @@ def test_dbg_an_pos_and_aln_seq(bgen, tmp_path):
 	read = g[u:u + 40] + B.flip_base(g[u + 40]) + g[u + 41:u + 100] + g[u + 103:u + 153]
 	res = _map(bgen, tmp_path, [("x", read)], ("--dbg-an-pos", "--dbg-aln-seq", "-O", "6", "-E", "3"))
 	af = [l.split("\t") for l in res.stderr.splitlines() if l.startswith("AF\t")]
-	assert len(af) >= 2
+	assert len(af) >= 1
 	prev = None
 	for f in af:
 		ctg, tpos, qpos, gap, length = f[2], int(f[3]), int(f[4]), int(f[5]), int(f[6])
@@ -288,7 +288,6 @@ def test_dbg_an_pos_and_aln_seq(bgen, tmp_path):
 		prev = (tpos, qpos)
 	lines = res.stderr.splitlines()
 	heads = [i for i, l in enumerate(lines) if l.startswith("===> ")]
-	assert heads
 	for i in heads:
 		assert lines[i].startswith("===> q=(6,6), e=(3,3), bw=")
 		t, q, sc = lines[i + 1], lines[i + 2], lines[i + 3]

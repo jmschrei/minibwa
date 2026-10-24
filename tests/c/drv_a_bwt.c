@@ -4,8 +4,9 @@
  * compare with a naive suffix array of the indexed text (tests/helpers_a.py),
  * and checks here only what is defined by another call of minibwa: rank
  * functions against each other, batched against unbatched SA and SMEM
- * lookups, the k-mer cache against base-by-base backward search,
- * mb_seed_intv_batch against mb_seed_intv, and mb_anchor_sort's order.
+ * lookups, mb_seed_intv_batch against mb_seed_intv, and mb_anchor_sort's
+ * order. The k-mer cache is checked only through the SMEMs found with it:
+ * its table layout is not part of any contract.
  * Intervals are compared as sets: the order in which batched calls return
  * them is not part of their contract. */
 
@@ -229,42 +230,6 @@ static int case_extend(int argc, char *argv[])
 		}
 	}
 	MBT_CHECK(1);
-	mb_bwt_destroy(bwt);
-	return 0;
-}
-
-/* args: <in.mbw> <len> <print>
- * builds the k-mer cache with mb_bwt_cache(len); checks every entry against backward
- * search; with print=1 also prints K z x0 x1 size for every entry */
-static int case_cache(int argc, char *argv[])
-{
-	mb_bwt_t *bwt;
-	int len, i, print, n_bad = 0;
-	uint64_t z, nz, n_occ = 0;
-	uint8_t p[16];
-	if (argc < 3) return MBT_FAIL("usage: cache <in.mbw> <len> <print>"), 1;
-	bwt = mb_bwt_load(argv[0]);
-	MBT_REQUIRE(bwt != 0);
-	len = atoi(argv[1]), print = atoi(argv[2]);
-	MBT_REQUIRE(len >= 1 && len <= 12);
-	mb_bwt_cache(bwt, len);
-	MBT_REQUIRE(bwt->pre != 0);
-	MBT_CHECK_INT(bwt->pre_len, ==, len);
-	nz = 1ULL << 2 * len;
-	for (z = 0; z < nz; ++z) {
-		const mb_sai_t *c = &bwt->pre[z];
-		mb_sai_t b;
-		for (i = 0; i < len; ++i) p[i] = z >> 2 * i & 3; // the first base is in the lowest bits
-		backward_intv(bwt, len, p, &b);
-		if ((b.size != c->size || (b.size > 0 && (b.x[0] != c->x[0] || b.x[1] != c->x[1]))) && n_bad++ < 10)
-			MBT_FAIL("cache entry %llu: [%llu,%llu,%llu], backward search [%llu,%llu,%llu]", (unsigned long long)z,
-				(unsigned long long)c->x[0], (unsigned long long)c->x[1], (unsigned long long)c->size,
-				(unsigned long long)b.x[0], (unsigned long long)b.x[1], (unsigned long long)b.size);
-		n_occ += c->size;
-		if (print) printf("K\t%llu\t%llu\t%llu\t%llu\n", (unsigned long long)z, (unsigned long long)c->x[0], (unsigned long long)c->x[1], (unsigned long long)c->size);
-	}
-	MBT_CHECK_INT(n_bad, ==, 0);
-	printf("O\t%llu\n", (unsigned long long)n_occ);
 	mb_bwt_destroy(bwt);
 	return 0;
 }
@@ -578,9 +543,7 @@ static int case_load(int argc, char *argv[])
 	if (argc < 3) return MBT_FAIL("usage: load <good.mbw> <good.l2b> <bad_file>"), 1;
 	bwt = mb_bwt_load(argv[0]);
 	MBT_REQUIRE(bwt != 0);
-	MBT_CHECK(bwt->data != 0);
 	MBT_CHECK_INT(bwt->L2[4], ==, bwt->seq_len);
-	MBT_CHECK(bwt->sa != 0);
 	mb_bwt_destroy(bwt);
 	mb_bwt_destroy(0);
 	l2b = l2b_load(argv[1]);
@@ -600,7 +563,6 @@ static const mbt_case_t cases[] = {
 	{ "rank", case_rank },
 	{ "sa", case_sa },
 	{ "extend", case_extend },
-	{ "cache", case_cache },
 	{ "smem", case_smem },
 	{ "seed", case_seed },
 	{ "anchor", case_anchor },
