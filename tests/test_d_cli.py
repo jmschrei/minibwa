@@ -1,8 +1,12 @@
 """Area D: the command line: `minibwa` dispatch, `minibwa map` option parsing, usage, errors, -o, -R, -H.
 
-Expected messages and exit codes come from main.c and map-main.c, the usage
-text and the README. Exit codes not stated anywhere (an unreadable read
-file, an unwritable output file) are not asserted; see known-bugs/.
+Exit codes come from main.c and map-main.c, the usage text and the README;
+the usage text itself is documentation and is matched line by line. The
+wording of error and warning messages is not documented, so a test only
+checks that a diagnostic line (a stderr line other than the `[M::...]`
+progress lines) appears and, where the message carries it, that it names the
+offending option or value. Exit codes not stated anywhere (an unreadable
+read file, an unwritable output file) are not asserted; see known-bugs/.
 """
 
 import gzip
@@ -28,6 +32,11 @@ def reads(synth, tmp_path_factory):
 
 def _run(args):
 	return H.run_minibwa(args)
+
+
+def _diag(stderr):
+	"""stderr lines other than the [M::...] progress lines: errors, warnings, usage."""
+	return [l for l in stderr.splitlines() if not l.startswith("[M::")]
 
 
 def test_no_arguments_prints_short_usage():
@@ -58,10 +67,11 @@ def test_version(argv):
 
 
 def test_unknown_command():
-	"""An unknown command prints `ERROR: unknown command '<cmd>'` to stderr and exits 1."""
+	"""An unknown command exits 1 with an error on stderr that names the command (`ERROR: unknown command
+	'<cmd>'` in base) and nothing on stdout."""
 	r = _run(["frobnicate", "x"])
 	assert r.returncode == 1 and r.stdout == ""
-	assert r.stderr.strip() == "ERROR: unknown command 'frobnicate'"
+	assert any("frobnicate" in l for l in _diag(r.stderr))
 
 
 def test_map_help_and_usage():
@@ -95,58 +105,59 @@ def test_presets_are_applied_before_other_options():
 	assert "    -w NUM           bandwidth [500]\n" in r.stdout  # from -x lr
 
 
-@pytest.mark.parametrize("argv,msg", [
-	(["--no-such-option"], '[ERROR] unknown option in "--no-such-option"'),
-	(["-Q"], '[ERROR] unknown option in "-Q"'),
-	(["-x", "nonexistent"], "[ERROR] unknown preset 'nonexistent'"),
+@pytest.mark.parametrize("argv,name", [
+	(["--no-such-option"], "--no-such-option"),
+	(["-Q"], "-Q"),
+	(["-x", "nonexistent"], "nonexistent"),
 ], ids=["long", "short", "preset"])
-def test_map_option_errors(synth, reads, argv, msg):
-	"""An unknown option or preset exits 1 with an error message and writes nothing to stdout."""
+def test_map_option_errors(synth, reads, argv, name):
+	"""An unknown option or preset exits 1 with an error naming it (base: `[ERROR] unknown option in "..."`,
+	`[ERROR] unknown preset '...'`) and writes nothing to stdout."""
 	r = _run(["map"] + argv + [synth.index, reads["fq"]])
 	assert r.returncode == 1 and r.stdout == ""
-	assert msg in r.stderr.splitlines()
+	assert any(name in l for l in _diag(r.stderr))
 
 
 def test_map_missing_option_argument(synth, reads):
-	"""An option missing its argument exits 1 with `[ERROR] missing option argument`."""
+	"""An option missing its argument exits 1 with an error on stderr (base: `[ERROR] missing option argument`)."""
 	for argv in (["map", synth.index, reads["fq"], "-t"], ["map", synth.index, reads["fq"], "--outn"]):
 		r = _run(argv)
 		assert r.returncode == 1 and r.stdout == ""
-		assert "[ERROR] missing option argument" in r.stderr.splitlines()
+		assert _diag(r.stderr)
 
 
 @pytest.mark.parametrize("cmd", ["map", "mem"])
 def test_missing_index_aborts(reads, tmp_path, cmd):
-	"""A missing index aborts (SIGABRT) with `[E::main_<cmd>] failed to load the index. ABORT!` before any
-	output; so does --meth on an index built without --meth."""
+	"""A missing index aborts (SIGABRT) with an error on stderr (base: `[E::main_<cmd>] failed to load the
+	index. ABORT!`) before any output."""
 	r = H.run_minibwa([cmd, str(tmp_path / "nope"), reads["fq"]])
 	assert r.returncode == SIGABRT and r.stdout == ""
-	assert "[E::main_%s] failed to load the index. ABORT!" % cmd in r.stderr
+	assert any("index" in l for l in _diag(r.stderr))
 
 
 def test_meth_needs_meth_index(synth, reads):
 	"""--meth loads <prefix>.meth.mbw; on an index built without --meth the load fails and map aborts."""
 	r = H.run_minibwa(["map", "--meth", synth.index, reads["fq"]])
 	assert r.returncode == SIGABRT and r.stdout == ""
-	assert "[E::main_map] failed to load the index. ABORT!" in r.stderr
+	assert any("index" in l for l in _diag(r.stderr))
 
 
 def test_unreadable_reads(synth, tmp_path):
-	"""A read file that cannot be opened prints `ERROR: failed to open file '<name>'` and writes only the
-	SAM header (the exit status is not asserted; see known-bugs/map-missing-reads-exit-0.md)."""
+	"""A read file that cannot be opened gives an error naming it (base: `ERROR: failed to open file '<name>'`)
+	and only the SAM header (the exit status is not asserted; see known-bugs/map-missing-reads-exit-0.md)."""
 	missing = str(tmp_path / "missing.fq")
 	r = _run(["map", synth.index, missing])
-	assert any(l.startswith("ERROR: failed to open file '%s'" % missing) for l in r.stderr.splitlines())
+	assert any(missing in l for l in _diag(r.stderr))
 	assert r.stdout and all(l.startswith("@") for l in r.stdout.splitlines())
 
 
 def test_main_reports_version_and_command(synth, reads):
-	"""After a successful command with arguments, main() writes `[M::main] Version: <MB_VERSION>` and
-	`[M::main] CMD: <argv>` to stderr. (The timing lines are not asserted.)"""
+	"""After a successful command with arguments, main() reports MB_VERSION and the command line on stderr
+	(base: `[M::main] Version: ...`, `[M::main] CMD: ...`). Wording and timing lines are not asserted."""
 	r = H.run_map(synth.index, reads["fq"])
 	lines = r.stderr.splitlines()
-	assert "[M::main] Version: %s" % D.mb_version() in lines
-	assert "[M::main] CMD: %s" % " ".join(r.argv) in lines
+	assert any(l.endswith(" " + D.mb_version()) for l in lines)
+	assert any(l.endswith(" " + " ".join(r.argv[1:])) for l in lines)
 
 
 def test_output_file(synth, reads, tmp_path):
@@ -173,18 +184,18 @@ def test_output_file(synth, reads, tmp_path):
 @pytest.mark.parametrize("opt,name,flag_effect", [("--pe", "pe", True), ("--kalloc", "kalloc", False), ("--adap", "adap", False),
 	("--long", "long", False)])
 def test_yes_or_no(synth, reads, opt, name, flag_effect):
-	"""Options taking yes/no accept yes, y, no and n; any other value prints
-	`[WARNING] option '--<name>' only accepts 'yes' or 'no'.` and leaves the setting as it was. --pe=no
+	"""Options taking yes/no accept yes, y, no and n; any other value prints a warning naming the option
+	(base: `[WARNING] option '--<name>' only accepts 'yes' or 'no'.`) and leaves the setting as it was. --pe=no
 	(or n) stops interleaved reads with equal names from being paired; --pe=yes (or y) is the default."""
 	base = H.strip_pg(H.run_map(synth.index, reads["il"]).stdout)
 	bad = H.run_map(synth.index, reads["il"], ["%s=maybe" % opt])
-	assert ("option '--%s' only accepts 'yes' or 'no'." % name) in bad.stderr
+	assert any("--" + name in l for l in _diag(bad.stderr))
 	assert H.strip_pg(bad.stdout) == base
 	if not flag_effect:
 		return
 	for v in ("yes", "y"):
 		r = H.run_map(synth.index, reads["il"], ["%s=%s" % (opt, v)])
-		assert "WARNING" not in r.stderr and H.strip_pg(r.stdout) == base
+		assert _diag(r.stderr) == [] and H.strip_pg(r.stdout) == base
 	no = [H.strip_pg(H.run_map(synth.index, reads["il"], ["%s=%s" % (opt, v)]).stdout) for v in ("no", "n")]
 	assert no[0] == no[1] != base
 	assert all(r.flag & 0x1 for r in H.parse_sam(base).records)
@@ -195,19 +206,19 @@ def test_yes_or_no(synth, reads, opt, name, flag_effect):
 # -R
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("rg,msg", [
-	("RG\\tID:x", "[ERROR] the read group line is not started with @RG"),
-	("@RG\tID:x", "[ERROR] the read group line contained literal <tab> characters -- replace with escaped tabs: \\t"),
-	("@RG\\tSM:x", "[ERROR] no ID within the read group line"),
-	("@RG\\tID:" + "a" * 256, "[ERROR] @RG:ID is longer than 255 characters"),
-	("@RG\\tID:" + "b" * 300 + "\\tSM:x", "[ERROR] @RG:ID is longer than 255 characters"),
+@pytest.mark.parametrize("rg", [
+	"RG\\tID:x",
+	"@RG\tID:x",
+	"@RG\\tSM:x",
+	"@RG\\tID:" + "a" * 256,
+	"@RG\\tID:" + "b" * 300 + "\\tSM:x",
 ], ids=["no-@RG", "literal-tab", "no-ID", "ID-256", "ID-300"])
-def test_rg_errors(synth, reads, rg, msg):
+def test_rg_errors(synth, reads, rg):
 	"""-R must start with @RG, contain no literal tab, have an ID: field and an ID shorter than 256
-	characters; otherwise `map` exits 1 with an error message and writes nothing to stdout."""
+	characters; otherwise `map` exits 1 with an error on stderr and writes nothing to stdout."""
 	r = H.run_map(synth.index, reads["fq"], ["-R", rg], check=False)
 	assert r.returncode == 1 and r.stdout == ""
-	assert msg in r.stderr.splitlines()
+	assert _diag(r.stderr)
 
 
 @pytest.mark.parametrize("rg,line,rid", [

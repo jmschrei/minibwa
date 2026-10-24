@@ -320,6 +320,18 @@ def test_source_hash_tracks_sources_only(tmp_path):
 	assert minibwa_build.source_hash(dst) != h0
 
 
+def test_make_args_change_the_build_key(monkeypatch):
+	"""MINIBWA_TEST_MAKE_ARGS reaches the build key (so an ASan or coverage build gets its own cache entry);
+	without it the key is unchanged."""
+	monkeypatch.delenv("MINIBWA_TEST_MAKE_ARGS", raising=False)
+	k0 = minibwa_build.build_key()
+	monkeypatch.setenv("MINIBWA_TEST_MAKE_ARGS", "asan=1 'MALLOC_O='")
+	assert minibwa_build.make_args() == ["asan=1", "MALLOC_O="]
+	assert minibwa_build.build_key() != k0
+	monkeypatch.setenv("MINIBWA_TEST_MAKE_ARGS", "")
+	assert minibwa_build.build_key() == k0
+
+
 def test_out_of_tree_build_leaves_tree_clean(minibwa_bin, tree_before):
 	"""Building the binary, libminibwa.a and a C driver adds no build product to the source tree."""
 	minibwa_build.c_driver("drv_pilot")

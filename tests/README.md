@@ -45,6 +45,25 @@ built `minibwa` and the drivers load `libz.so` and `libomp.so` at run time.
 For the suite's runs `E` was
 `/home/jmschrei/auto-optimization/2026-10-24-chromap-speed/toolchains/clang`.
 
+### AddressSanitizer
+
+`make asan=1` alone gives a binary that crashes at startup: mimalloc's
+`malloc` override is called while the ASan runtime initializes. Build
+without mimalloc instead, and without kalloc so that ASan sees every
+allocation (an empty `MALLOC_O` keeps kalloc off; `mimalloc=0` would turn it
+on), and compile the drivers with the sanitizer too:
+
+```sh
+MINIBWA_TEST_MAKE_ARGS="asan=1 MALLOC_O=" CC="gcc -fsanitize=address" \
+	ASAN_OPTIONS=detect_leaks=0 python3 -m pytest tests
+```
+
+On base minibwa the whole suite passes this way with no ASan error. With
+leak detection on, `minibwa getref` and `minibwa fastmap` report memory
+still allocated at exit, and the tests that run them fail on the exit code
+(known-bugs/r1-asan-findings.md); `minibwa map` returning early on an
+invalid `-R` line reports such memory too (known-bugs/r2-asan-findings.md).
+
 | Variable | Default | Meaning |
 |:---------|:--------|:--------|
 | `MINIBWA_BIN` | build from source | binary under test |
@@ -52,6 +71,7 @@ For the suite's runs `E` was
 | `CC` | `gcc` | compiler for the build and the C drivers |
 | `MINIBWA_TEST_CACHE_DIR` | `$XDG_CACHE_HOME/minibwa-tests` or `~/.cache/minibwa-tests` | build cache |
 | `MINIBWA_TEST_MAKE_JOBS` | 4 | `make -j` for the build |
+| `MINIBWA_TEST_MAKE_ARGS` | unset | extra `make` arguments for the build, e.g. `asan=1 MALLOC_O=` (part of the cache key) |
 | `MINIBWA_TEST_THREADS` | 1 | `-t` for tests that do not set it themselves |
 | `MINIBWA_TEST_TIMEOUT` | 120 | seconds before one minibwa or driver process is killed |
 | `MINIBWA_TEST_UPDATE_PINS` | unset | `1` rewrites pinned outputs (only on base minibwa) |
@@ -174,6 +194,21 @@ expected values) as arguments from Python; drivers should not build indexes.
 `mbt_read_seqs()` reads a small plain FASTA/FASTQ file. Match minibwa's C
 style (tabs, C99).
 
+Drivers that call only `minibwa.h` (`drv_pilot`, `drv_c_pe`) or a few
+internal functions through their prototypes need at most call-site edits
+when an internal signature changes. These read or build internal structs or
+test internal components directly, and would need more than that if those
+change: `drv_a_bwt` (`mb_bwt_t` `seq_len`/`primary`/`L2`, `l2b_t` and
+`l2b_ctg_t` fields, `mb_sai_t`, `mb_anchor_t`, `mb_smem_entry_t`),
+`drv_b_chain` and `drv_b_hits` (build `mb_anchor_t`, `mb_hit_t`,
+`mb_extra_t` and `l2b_t` by hand), `drv_b_extra` (`mb_hit_t`/`mb_extra_t`,
+the cs string after `cigar[n_cigar]`), `drv_b_ksw` (`ksw_extz_t`; vendored
+ksw2), `drv_dkommon` (`l2b_t` fields, the `--meth` BWT text layout, and
+`kt_for`/`kt_pipeline` semantics if kthread is replaced) and `drv_dapi`'s
+`fmt` case (calls the internal `mb_format()` with an `mb_bseq1_t` and
+`idx->l2b`). `drv_a_input` uses `mb_bseq1_t`, public `mb_opt_t` fields and
+the public API.
+
 ## Rules for expected values
 
 * Derive expected values independently wherever practical: inputs small
@@ -200,6 +235,13 @@ style (tabs, C99).
   the order of intervals returned by `mb_seed_intv_batch`, the `hash`, `as`,
   `id` or `flt` fields of `mb_hit_t`. Pinning the bytes of `minibwa map`
   output on fixed inputs is fine and wanted.
+* Never compare stderr wholesale. For a warning or an error, check that a
+  message appears (a stderr line other than the `[M::...]` progress lines)
+  and, where it carries one, that it names the offending option or value; do
+  not match its wording: no minibwa document fixes it, and a faster
+  implementation may reword it. Debug output (`--dbg-*`) may be parsed for
+  its fields and numbers, but do not require a particular number of DP
+  calls, anchors or trace lines.
 
 ## Things to know about minibwa's output
 
@@ -258,3 +300,18 @@ style (tabs, C99).
   `-t 1` and set `OMP_NUM_THREADS`.
 * The default build disables kalloc (`MB_F_NO_KALLOC`) unless built with
   `mimalloc=0`; `--kalloc=yes` turns it on.
+* AS:i is the DP score (`mb_extra_t.dp_score`). It usually equals the score
+  of the CIGAR, but keeps the cost of an indel that `mb_fix_cigar` slides to
+  the read start and then drops (seen in (CTT)n tracts).
+* `-O`/`-E` pairs get the documented cost min(O1+k*E1, O2+k*E2) only when
+  O1 < O2 and E1 > E2 (known-bugs/r1-dual-gap-penalty-order.md).
+* A size-1 SA interval at the sentinel's row is extended by one base that is
+  not there (known-bugs/a-rank2a-sentinel-row.md, r1-rank2a-text-start.md):
+  reads that run past the start or the end of the indexed text
+  F + revcomp(F) can get SMEMs that do not exist. Test reads there avoid the
+  triggering base.
+* Pair orientations: `mb_pestat` labels a same-strand pair FF or RR by read
+  order, but pairing looks it up by coordinate order, so in an FF-only (or
+  RR-only) library the pairs from reverse-strand fragments are never proper
+  (known-bugs/r2-same-strand-orientation-labels.md). FR and RF libraries are
+  not affected.

@@ -11,12 +11,14 @@ Environment variables:
 	MINIBWA_TEST_CACHE_DIR build cache (default: $XDG_CACHE_HOME/minibwa-tests
 	                       or ~/.cache/minibwa-tests)
 	MINIBWA_TEST_MAKE_JOBS parallel jobs for make (default: 4)
+	MINIBWA_TEST_MAKE_ARGS extra make arguments, e.g. "asan=1 MALLOC_O=" (default: none)
 	CC                     C compiler (default: gcc)
 """
 
 import fcntl
 import hashlib
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -48,6 +50,11 @@ def make_jobs():
 		return max(1, int(os.environ.get("MINIBWA_TEST_MAKE_JOBS", "4")))
 	except ValueError:
 		return 4
+
+
+def make_args():
+	"""Extra arguments for make from $MINIBWA_TEST_MAKE_ARGS (shell words), e.g. ["asan=1", "MALLOC_O="]."""
+	return shlex.split(os.environ.get("MINIBWA_TEST_MAKE_ARGS", ""))
 
 
 def cache_root():
@@ -108,6 +115,8 @@ def build_key(root=None, cc=None):
 	h.update(source_hash(root).encode())
 	h.update(compiler_id(cc).encode())
 	h.update(("%s-%s" % (sys.platform, os.uname().machine)).encode())
+	if make_args():  # keys of builds without extra arguments are unchanged
+		h.update(("make:" + "\0".join(make_args())).encode())
 	return h.hexdigest()[:20]
 
 
@@ -166,12 +175,12 @@ def build_dir(root=None, cc=None):
 			if build_key(tmp, cc) != key:
 				raise BuildError("sources changed while being copied from %s; retry" % root)
 			log = os.path.join(tmp, "build.log")
-			_run(["make", "-j%d" % make_jobs(), "CC=" + cc, "minibwa", "libminibwa.a"], tmp, log)
+			_run(["make", "-j%d" % make_jobs(), "CC=" + cc] + make_args() + ["minibwa", "libminibwa.a"], tmp, log)
 			for prod in ("minibwa", "libminibwa.a"):
 				if not os.path.exists(os.path.join(tmp, prod)):
 					raise BuildError("make did not produce %s in %s" % (prod, tmp))
 			with open(os.path.join(tmp, "build.info"), "w") as f:
-				f.write("source: %s\nkey: %s\ncompiler: %s\n" % (root, key, compiler_id(cc)))
+				f.write("source: %s\nkey: %s\nmake arguments: %s\ncompiler: %s\n" % (root, key, " ".join(make_args()), compiler_id(cc)))
 			open(os.path.join(tmp, ".complete"), "w").close()
 			os.replace(tmp, final)
 		except BaseException:
