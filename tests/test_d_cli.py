@@ -161,8 +161,10 @@ def test_output_file(synth, reads, tmp_path):
 		text = f.read()
 	assert H.strip_pg(text) == H.strip_pg(base.stdout)
 	assert "\tCL:minibwa map -o %s " % out in text
-	r = H.run_map(synth.index, reads["fq"], ["-o", "-"])
+	# run in a scratch directory, so a binary that treats "-" as a file name writes there, not into the tree
+	r = H.run_minibwa(["map", "-o", "-", "-t", H.test_threads(), synth.index, reads["fq"]], cwd=str(tmp_path), check=True)
 	assert H.strip_pg(r.stdout) == H.strip_pg(base.stdout)
+	assert not os.path.exists(str(tmp_path / "-"))
 	paf = str(tmp_path / "o.paf")
 	r = H.run_map(synth.index, reads["fq"], ["-f", "-o", paf])
 	with open(paf) as f:
