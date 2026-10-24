@@ -191,6 +191,36 @@ def minibwa_bin():
 	return os.path.join(build_dir(), "minibwa")
 
 
+# Objects that `make minibwa` builds but does not put in libminibwa.a, which C drivers may
+# call: bseq.o (mb_bseq_*) and kthread.o (kt_for, kt_pipeline). They are archived into
+# libmbt_extra.a in the build directory, so a driver links only the members it needs and a
+# driver that includes the .c file itself still links without duplicate symbols.
+EXTRA_OBJS = ("bseq.o", "kthread.o")
+EXTRA_LIB = "libmbt_extra.a"
+
+
+def extra_lib(d=None):
+	"""Path of libmbt_extra.a (EXTRA_OBJS from the out-of-tree build), created on first use."""
+	d = d or build_dir()
+	lib = os.path.join(d, EXTRA_LIB)
+	if os.path.exists(lib):
+		return lib
+	with _Lock(lib + ".lock"):
+		if os.path.exists(lib):
+			return lib
+		objs = [os.path.join(d, o) for o in EXTRA_OBJS]
+		missing = [o for o in objs if not os.path.exists(o)]
+		if missing:
+			raise BuildError("the build in %s has no %s" % (d, ", ".join(missing)))
+		tmp = lib + ".tmp%d" % os.getpid()
+		cmd = (os.environ.get("AR") or "ar").split() + ["rcs", tmp] + objs
+		p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+		if p.returncode != 0:
+			raise BuildError("command failed (exit %d): %s\n%s" % (p.returncode, " ".join(cmd), p.stdout.decode("utf-8", "replace")))
+		os.replace(tmp, lib)
+	return lib
+
+
 def libminibwa():
 	"""(path to libminibwa.a, include directory), both from the out-of-tree build."""
 	d = build_dir()
@@ -205,17 +235,19 @@ def c_driver_sources(name):
 
 
 def c_driver(name, extra_cflags=()):
-	"""Compile tests/c/<name>.c against libminibwa.a; return the executable's path.
+	"""Compile tests/c/<name>.c against libminibwa.a and libmbt_extra.a; return the executable's path.
 
 	The driver sees minibwa's headers (minibwa.h and the internal ones) and
 	tests/c/minibwa_test.h. It is rebuilt when the driver, the test header,
 	the library sources or the compiler change.
 	"""
 	lib, inc = libminibwa()
+	xlib = extra_lib(inc)
 	cc = compiler()
 	h = hashlib.sha256()
 	h.update(os.path.basename(inc).encode())
 	h.update(" ".join(extra_cflags).encode())
+	h.update(EXTRA_LIB.encode())
 	for p in c_driver_sources(name):
 		with open(p, "rb") as f:
 			h.update(hashlib.sha256(f.read()).digest())
@@ -229,7 +261,7 @@ def c_driver(name, extra_cflags=()):
 			return exe
 		tmp = exe + ".tmp%d" % os.getpid()
 		cmd = cc.split() + ["-std=gnu99", "-g", "-O2", "-Wall"] + list(extra_cflags) + \
-			["-I" + inc, "-I" + C_DIR, "-o", tmp, os.path.join(C_DIR, name + ".c"), lib, "-lz", "-lm", "-lpthread"]
+			["-I" + inc, "-I" + C_DIR, "-o", tmp, os.path.join(C_DIR, name + ".c"), lib, xlib, "-lz", "-lm", "-lpthread"]
 		p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=300)
 		if p.returncode != 0:
 			raise BuildError("failed to compile C driver %s:\n$ %s\n%s" % (name, " ".join(cmd), p.stdout.decode("utf-8", "replace")))

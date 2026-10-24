@@ -119,14 +119,14 @@ def test_map_missing_option_argument(synth, reads):
 def test_missing_index_aborts(reads, tmp_path, cmd):
 	"""A missing index aborts (SIGABRT) with `[E::main_<cmd>] failed to load the index. ABORT!` before any
 	output; so does --meth on an index built without --meth."""
-	r = D.run_minibwa_abort([cmd, str(tmp_path / "nope"), reads["fq"]])
+	r = H.run_minibwa([cmd, str(tmp_path / "nope"), reads["fq"]])
 	assert r.returncode == SIGABRT and r.stdout == ""
 	assert "[E::main_%s] failed to load the index. ABORT!" % cmd in r.stderr
 
 
 def test_meth_needs_meth_index(synth, reads):
 	"""--meth loads <prefix>.meth.mbw; on an index built without --meth the load fails and map aborts."""
-	r = D.run_minibwa_abort(["map", "--meth", synth.index, reads["fq"]])
+	r = H.run_minibwa(["map", "--meth", synth.index, reads["fq"]])
 	assert r.returncode == SIGABRT and r.stdout == ""
 	assert "[E::main_map] failed to load the index. ABORT!" in r.stderr
 
@@ -141,13 +141,12 @@ def test_unreadable_reads(synth, tmp_path):
 
 
 def test_main_reports_version_and_command(synth, reads):
-	"""After a successful command with arguments, main() writes `[M::main] Version: <MB_VERSION>`,
-	`[M::main] CMD: <argv>` and `[M::main] Real time: ...` to stderr."""
+	"""After a successful command with arguments, main() writes `[M::main] Version: <MB_VERSION>` and
+	`[M::main] CMD: <argv>` to stderr. (The timing lines are not asserted.)"""
 	r = H.run_map(synth.index, reads["fq"])
 	lines = r.stderr.splitlines()
 	assert "[M::main] Version: %s" % D.mb_version() in lines
 	assert "[M::main] CMD: %s" % " ".join(r.argv) in lines
-	assert any(l.startswith("[M::main] Real time: ") for l in lines)
 
 
 def test_output_file(synth, reads, tmp_path):

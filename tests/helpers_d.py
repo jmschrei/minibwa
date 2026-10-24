@@ -14,7 +14,6 @@ the standard library only.
 	                        scoring (match 2, mismatch 8, ambiguous 1)
 	expected_sa()           SA:Z entries recomputed from the other records
 	mb_version()            MB_VERSION read from minibwa.h
-	run_minibwa_abort()     run a command expected to abort, without a crash handler
 """
 
 import os
@@ -34,27 +33,6 @@ def mb_version(src=None):
 	if not m:
 		raise AssertionError("no MB_VERSION in minibwa.h")
 	return m.group(1)
-
-
-def _core_limit_one():
-	try:
-		import resource
-		resource.setrlimit(resource.RLIMIT_CORE, (1, 1))
-	except (ImportError, ValueError, OSError):
-		pass
-
-
-def run_minibwa_abort(args, timeout=60):
-	"""Run minibwa for a case expected to abort, with RLIMIT_CORE at 1: unlike 0, that also stops
-	the kernel from piping the core to a crash handler such as apport, which takes about a second
-	per abort (the same approach as helpers_a.run_minibwa_abort). Returns minibwa_helpers.Result."""
-	import subprocess
-	argv = [minibwa_build.minibwa_bin()] + [str(a) for a in args]
-	env = dict(os.environ)
-	env.setdefault("LC_ALL", "C")
-	kw = {"preexec_fn": _core_limit_one} if os.name == "posix" else {}
-	p = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, env=env, **kw)
-	return H.Result(argv, p.returncode, p.stdout, p.stderr)
 
 
 def _sub(c):

@@ -1,7 +1,7 @@
 """Area C: byte pins of `minibwa map` paired-end and Hi-C output on fixed synthetic
 input, for the code paths a speed optimization of pairing is likely to touch:
 insert-size inference, pairing among repeat copies, mate rescue, pair MAPQ,
--5 and --hic.
+-5 and --hic, and libraries in the FF, RR and RF orientations as well as FR.
 
 The genome has diverged repeat families (so pairing decides between copies
 and the pair MAPQ depends on the insert-size statistics) and the reads
@@ -97,3 +97,47 @@ def test_hic_output_pinned(pin_input):
 	sam = res.sam()
 	assert H.pair_invariant_errors(sam) == [] and not any(r.is_proper_pair for r in sam.records)
 	H.check_pinned("c_hic.sam.gz", H.strip_pg(res.stdout))
+
+
+def _orient_library(g, libs, n=50, n_unseed=6):
+	"""Read 1 and read 2 records of libraries in the given orientations [(orient, insert mean)], n pairs
+	each from anywhere in the genome plus n_unseed pairs whose read 1 or read 2 (alternately) has no
+	seed, so only mate rescue in that orientation can place it."""
+	r1, r2 = [], []
+	for k, (orient, ins) in enumerate(libs):
+		pairs = H.simulate_pairs(g, n + n_unseed, seed=130 + k, insert_mean=ins, insert_sd=30, sub_rate=0.01, indel_rate=0.001,
+			qual=None, name_prefix=orient.lower())
+		for i, p in enumerate(pairs):
+			a, b, _ = C.reorient(p, orient)
+			if i >= n and i & 1:
+				a = C.substitute(a, C.unseedable_subs(len(a)))
+			elif i >= n:
+				b = C.substitute(b, C.unseedable_subs(len(b)))
+			r1.append((p.name, a))
+			r2.append((p.name, b))
+	return r1, r2
+
+
+ORIENT_RUNS = [
+	("c_pe_orient.sam.gz", (("FR", 300), ("FF", 300), ("RR", 300), ("RF", 500)), 4),
+	("c_pe_ff.sam.gz", (("FF", 300),), 1),
+]
+
+
+@pytest.mark.pinned
+@pytest.mark.parametrize("name,libs,n_dir", ORIENT_RUNS, ids=["mixed", "ff"])
+def test_orientation_output_pinned(pin_input, tmp_path, name, libs, n_dir):
+	"""Pins the current output: paired-end SAM of a library mixing FR, FF, RR and RF pairs (statistics
+	inferred for all four orientations), and of an FF-only library, both with mates that only rescue can
+	place, so pairing, the rescue windows and the pair MAPQ are pinned in every orientation."""
+	g, idx = pin_input[0], pin_input[1]
+	r1, r2 = _orient_library(g, libs)
+	f1 = H.write_fasta(str(tmp_path / "o1.fa"), r1)
+	f2 = H.write_fasta(str(tmp_path / "o2.fa"), r2)
+	res = H.run_map(idx, [f1, f2])
+	cands, pct, bnd = C.stderr_pestat(res.stderr)
+	assert len(cands) == 1 and len(bnd) == n_dir
+	sam = res.sam()
+	assert H.pair_invariant_errors(sam) == []
+	assert sum(r.is_proper_pair for r in sam.records if r.is_primary) > 0
+	H.check_pinned(name, H.strip_pg(res.stdout))

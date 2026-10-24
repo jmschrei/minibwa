@@ -29,7 +29,9 @@ import hashlib
 import io
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 
 import minibwa_build
 
@@ -825,15 +827,21 @@ def read_fasta(path):
 
 
 def _no_core():
+	"""preexec_fn: no core dump from the child. The limit is 1 byte, not 0: when the kernel pipes
+	cores to a crash handler (Linux core_pattern starting with '|', e.g. apport), it still runs the
+	handler at a limit of 0, about a second per abort, but skips it at a limit of 1."""
 	try:
 		import resource
 	except ImportError:
 		return
 	if hasattr(resource, "RLIMIT_CORE"):
 		try:
-			resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-		except (ValueError, OSError):
-			pass
+			resource.setrlimit(resource.RLIMIT_CORE, (1, 1))
+		except (ValueError, OSError):  # a hard limit of 0 cannot be raised to 1
+			try:
+				resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+			except (ValueError, OSError):
+				pass
 
 
 class Result(object):
@@ -861,7 +869,11 @@ class Result(object):
 
 
 def run_minibwa(args, binary=None, timeout=None, stdin=None, env=None, cwd=None, check=False):
-	"""Run `minibwa <args>`; stdin may be bytes, str or None. Core dumps are disabled."""
+	"""Run `minibwa <args>`; stdin may be bytes, str or None. Core dumps are disabled.
+
+	The process runs in `cwd`, or by default in a new temporary directory that is
+	removed afterwards, so a relative output path (or a binary that writes a stray
+	file) can never land in the source tree. Give paths in `args` as absolute paths."""
 	argv = [binary or minibwa_build.minibwa_bin()] + [str(a) for a in args]
 	if isinstance(stdin, str):
 		stdin = stdin.encode()
@@ -872,11 +884,17 @@ def run_minibwa(args, binary=None, timeout=None, stdin=None, env=None, cwd=None,
 	kw = {}
 	if os.name == "posix":
 		kw["preexec_fn"] = _no_core
+	tmp = None
+	if cwd is None:
+		tmp = cwd = tempfile.mkdtemp(prefix="minibwa-run-")
 	try:
 		p = subprocess.run(argv, input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-			timeout=timeout or run_timeout(), env=full_env, cwd=cwd, **kw)
+			timeout=timeout or run_timeout(), env=full_env, cwd=str(cwd), **kw)
 	except subprocess.TimeoutExpired as e:
 		raise AssertionError("%s timed out after %s s" % (" ".join(argv), e.timeout))
+	finally:
+		if tmp is not None:
+			shutil.rmtree(tmp, ignore_errors=True)
 	r = Result(argv, p.returncode, p.stdout, p.stderr)
 	return r.check() if check else r
 
@@ -889,24 +907,34 @@ def _has_thread_opt(args):
 	return False
 
 
-def run_map(index, reads, args=(), threads=None, binary=None, timeout=None, stdin=None, env=None, check=True, subcommand="map"):
+def _abs(path):
+	path = str(path)
+	return path if path == "-" else os.path.abspath(path)
+
+
+def run_map(index, reads, args=(), threads=None, binary=None, timeout=None, stdin=None, env=None, check=True, subcommand="map",
+		cwd=None):
 	"""Run `minibwa map [args] -t N <index> <reads...>`.
 
 	reads is a path or a list of paths ('-' reads stdin). The thread count is
 	`threads` if given, else whatever `args` sets with a separate -t/-tN, else
-	$MINIBWA_TEST_THREADS. check=True raises on a non-zero exit.
+	$MINIBWA_TEST_THREADS. check=True raises on a non-zero exit. The process
+	runs in `cwd`, by default a temporary directory (see run_minibwa); the
+	index and read paths are made absolute first.
 	"""
 	args = [str(a) for a in args]
 	if isinstance(reads, (str, bytes)) or hasattr(reads, "__fspath__"):
 		reads = [reads]
+	index = _abs(index)
+	reads = [_abs(r) for r in reads]
 	if threads is not None:
 		if _has_thread_opt(args):
 			raise ValueError("give the thread count either in args or as threads=, not both")
 		args = args + ["-t", str(threads)]
 	elif not _has_thread_opt(args):
 		args = args + ["-t", str(test_threads())]
-	argv = [subcommand] + args + [str(index)] + [str(r) for r in reads]
-	return run_minibwa(argv, binary=binary, timeout=timeout, stdin=stdin, env=env, check=check)
+	argv = [subcommand] + args + [index] + reads
+	return run_minibwa(argv, binary=binary, timeout=timeout, stdin=stdin, env=env, cwd=cwd, check=check)
 
 
 _INDEX_CACHE = {}

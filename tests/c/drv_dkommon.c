@@ -1,6 +1,6 @@
 /* Area D driver: the helpers every output byte goes through (kommon.c,
  * mb_escape), the bisulfite helpers of l2bit.c, and kthread.c (not part of
- * libminibwa.a, so it is compiled into this driver).
+ * libminibwa.a; the harness links kthread.o from libmbt_extra.a).
  *
  * Cases:
  *   sprintf_lite   kom_sprintf_lite/km_sprintf_lite against snprintf
@@ -22,7 +22,7 @@
 #include "kalloc.h"
 #include "l2bit.h"
 #include "mbpriv.h"
-#include "kthread.c"
+#include "kthread.h"
 #include "minibwa_test.h"
 
 static int case_sprintf_lite(int argc, char *argv[])
@@ -73,12 +73,10 @@ static int case_sprintf_lite(int argc, char *argv[])
 		"chrX", '-', 77L, 4000000000U);
 	MBT_CHECK_STR(s.s, want);
 	MBT_CHECK_INT(s.l, ==, strlen(want));
-	// literal text only, and a NULL string: only the length is returned
+	// literal text only (the NULL-buffer mode that only returns a length has no caller, so it is not tested)
 	s.l = 0;
 	MBT_CHECK_INT(kom_sprintf_lite(&s, "no conversions"), ==, 14);
 	MBT_CHECK_STR(s.s, "no conversions");
-	// (no %c here: with a NULL buffer the %c branch does not consume its argument; no caller uses a NULL buffer)
-	MBT_CHECK_INT(kom_sprintf_lite(0, "%d:%s:%ld:%u", -42, "abc", 1234567L, 77U), ==, (long long)strlen("-42:abc:1234567:77"));
 	// many appends grow the buffer; compare with one snprintf of the whole
 	s.l = 0;
 	big = (char*)malloc(1 << 20);

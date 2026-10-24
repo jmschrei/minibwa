@@ -20,21 +20,28 @@
 #include "mbpriv.h"
 #include "minibwa_test.h"
 
+/* the hit whose id is `id`, or NULL (mb_hit_t.id is "for internal uses"; only parent == id is relied on) */
+static const mb_hit_t *hit_by_id(int32_t n_hit, const mb_hit_t *hit, int32_t id)
+{
+	int32_t j;
+	for (j = 0; j < n_hit; ++j)
+		if (hit[j].id == id) return &hit[j];
+	return 0;
+}
+
 /* check the documented relations between the fields of one read's hits */
 static void check_hits(const mb_idx_t *idx, const char *name, int32_t qlen, int32_t n_hit, const mb_hit_t *hit)
 {
 	int32_t j, n_sam_pri = 0;
 	for (j = 0; j < n_hit; ++j) {
-		const mb_hit_t *h = &hit[j];
+		const mb_hit_t *h = &hit[j], *par;
 		int64_t ctg_len = mb_idx_ctg_len(idx, h->tid);
 		int32_t k, ql = 0, tl = 0;
 		MBT_CHECKF(mb_idx_ctg_name(idx, h->tid) != 0 && ctg_len > 0, "%s: hit %d tid %ld out of range", name, j, (long)h->tid);
 		MBT_CHECKF(0 <= h->ts && h->ts < h->te && h->te <= ctg_len, "%s: hit %d spans %ld-%ld", name, j, (long)h->ts, (long)h->te);
 		MBT_CHECKF(0 <= h->qs && h->qs < h->qe && h->qe <= qlen, "%s: hit %d query %d-%d of %d", name, j, h->qs, h->qe, qlen);
-		MBT_CHECKF(h->id == j, "%s: hit %d has id %d", name, j, h->id);
-		MBT_CHECKF(h->parent >= 0 && h->parent < n_hit, "%s: hit %d parent %d", name, j, h->parent);
-		if (h->parent >= 0 && h->parent < n_hit)
-			MBT_CHECKF(hit[h->parent].parent == h->parent, "%s: hit %d's parent %d is not a primary", name, j, h->parent);
+		par = hit_by_id(n_hit, hit, h->parent); // a secondary's parent is a primary hit of the same read
+		MBT_CHECKF(par != 0 && par->parent == par->id, "%s: hit %d's parent %d is not a primary hit", name, j, h->parent);
 		MBT_CHECKF(0 <= h->mlen && h->mlen <= h->blen, "%s: hit %d mlen %d blen %d", name, j, h->mlen, h->blen);
 		MBT_CHECKF(0 <= h->mapq && h->mapq <= 60, "%s: hit %d mapq %d", name, j, h->mapq);
 		if (h->sam_pri) {

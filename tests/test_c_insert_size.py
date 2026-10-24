@@ -173,7 +173,7 @@ def test_fewer_than_20_pairs_use_default_statistics(ins_genome, long_inserts, tm
 	g, idx = ins_genome
 	f1, f2 = _write(tmp_path, long_inserts[:19])
 	res = H.run_map(idx, [f1, f2])
-	assert "mb_pestat" not in res.stderr
+	assert not C.has_pestat_report(res.stderr)
 	sam = res.sam()
 	assert not any(r.is_proper_pair for r in sam.records)
 	assert all(not r.is_unmapped for r in sam.records)
@@ -233,6 +233,39 @@ def test_min_orientation_ratio(ins_genome, tmp_path, n_fr, rf_fails):
 	assert all(a.is_proper_pair == b.is_proper_pair == (not rf_fails) for a, b in by.values())
 
 
+def test_statistics_in_all_four_orientations(ins_genome, tmp_path):
+	"""A library mixing all four orientations (30 pairs each from chrB: FR, FF with read 2 reversed, RR
+	with read 1 reversed, RF with both) infers statistics for every orientation, each equal to the
+	Python recomputation from the true 5' positions (helpers_c.reorient); FR and RF pairs within their
+	bounds are proper. (Same-strand pairs are not checked for 0x2: see
+	known-bugs/r2-same-strand-orientation-labels.md.)"""
+	g, idx = ins_genome
+	pairs = []
+	for k, (orient, ins) in enumerate((("FR", 300), ("FF", 280), ("RR", 320), ("RF", 520))):
+		for p in H.simulate_pairs(g, 30, seed=140 + k, insert_mean=ins, insert_sd=25, sub_rate=0.005, indel_rate=0.0,
+				contigs=["chrB"], name_prefix=orient.lower()):
+			pairs.append((p.name, orient) + C.reorient(p, orient))
+	dists = [[], [], [], []]
+	for name, orient, s1, s2, (code, dist) in pairs:
+		dists[code].append(dist)
+	assert [len(x) for x in dists] == [30, 30, 30, 30]
+	ps = C.pestat(dists)
+	f1 = H.write_fasta(str(tmp_path / "o1.fa"), [(x[0], x[2]) for x in pairs])
+	f2 = H.write_fasta(str(tmp_path / "o2.fa"), [(x[0], x[3]) for x in pairs])
+	res = H.run_map(idx, [f1, f2])
+	cands, pct, bnd = C.stderr_pestat(res.stderr)
+	assert cands == [(30, 30, 30, 30)]
+	assert pct == [(C.DIR_NAMES[d], (s["p25"], s["p50"], s["p75"], "%.2f" % s["avg"], "%.2f" % s["std"])) for d, s in enumerate(ps)]
+	assert bnd == [(C.DIR_NAMES[d], (s["lo"], s["hi"], "%.2f" % s["pct_lo"], "%.2f" % s["pct_hi"])) for d, s in enumerate(ps)]
+	sam = res.sam()
+	assert H.pair_invariant_errors(sam) == []
+	prim = sam.primaries()
+	for name, orient, s1, s2, (code, dist) in pairs:
+		if orient in ("FR", "RF"):
+			want = ps[code]["lo"] <= dist <= ps[code]["hi"]
+			assert prim[(name, 1)].is_proper_pair == prim[(name, 2)].is_proper_pair == want, (name, dist)
+
+
 # ---------------------------------------------------------------------------
 # Statistics per batch
 # ---------------------------------------------------------------------------
@@ -250,13 +283,12 @@ def test_statistics_are_inferred_per_batch(ins_genome, tmp_path):
 	f1, f2 = _write(tmp_path, a + b)
 	one = H.run_map(idx, [f1, f2])
 	two = H.run_map(idx, [f1, f2], ["-K", "21000"])
-	assert len(two.stderr.split("mapped 21000 bp in 140 sequences")) == 2  # precondition: the batch split
 	_, ps_all = _expected_stats(a + b)
 	_, ps_a = _expected_stats(a)
 	_, ps_b = _expected_stats(b)
 	c1, _, bnd1 = C.stderr_pestat(one.stderr)
 	c2, _, bnd2 = C.stderr_pestat(two.stderr)
-	assert c1 == [(0, 90, 0, 0)] and c2 == [(0, 70, 0, 0), (0, 20, 0, 0)]
+	assert c1 == [(0, 90, 0, 0)] and c2 == [(0, 70, 0, 0), (0, 20, 0, 0)]  # one batch, then two
 	assert [x[1][:2] for x in bnd1] == [(ps_all[1]["lo"], ps_all[1]["hi"])]
 	assert [x[1][:2] for x in bnd2] == [(ps_a[1]["lo"], ps_a[1]["hi"]), (ps_b[1]["lo"], ps_b[1]["hi"])]
 	by1, by2 = _flags_by_pair(one.sam(), a + b), _flags_by_pair(two.sam(), a + b)
@@ -309,7 +341,7 @@ def test_insert_size_option_bounds(ins_genome, ins_boundary_pairs, tmp_path, opt
 	avg, std, hi, lo = stats
 	f1, f2 = _write(tmp_path, ins_boundary_pairs)
 	res = H.run_map(idx, [f1, f2], ["-I", opt, "--rescue=0"])
-	assert "mb_pestat" not in res.stderr
+	assert not C.has_pestat_report(res.stderr)
 	sam = res.sam()
 	assert H.pair_invariant_errors(sam) == []
 	by = _flags_by_pair(sam, ins_boundary_pairs)

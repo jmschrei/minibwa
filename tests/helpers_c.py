@@ -19,6 +19,7 @@ Contents:
 	unseedable_subs        substitution offsets that leave no exact 19-mer
 	write_pairs_c          read 1 and read 2 files (FASTQ)
 	write_interleaved_c    one interleaved file, optionally with single reads
+	reorient               turn a simulated FR pair into an FF, RR or RF pair, with its true code
 	insert_dir             orientation code and 5'-to-5' distance (FF=0, FR=1, RF=2, RR=3)
 	pestat                 the insert-size statistics minibwa infers, recomputed
 	pair_score             the score of a pairing, recomputed
@@ -194,6 +195,23 @@ def write_interleaved_c(path, items, suffix=False):
 	return str(path)
 
 
+# Mates reverse-complemented to turn a simulated FR pair (read 1 at one end of the fragment, read 2
+# at the other, facing each other) into another library orientation: FF flips read 2, RR read 1, RF both.
+ORIENT_FLIPS = {"FR": (False, False), "FF": (False, True), "RR": (True, False), "RF": (True, True)}
+
+
+def reorient(pair, orient):
+	"""(read 1 seq, read 2 seq, (code, distance)) of an H.SimPair turned into orientation `orient`;
+	the code and 5'-to-5' distance are those mb_pestat assigns from the true placement
+	(insert_dir), on the read-1-first convention of pe.c."""
+	out = []
+	for r, flip in zip((pair.r1, pair.r2), ORIENT_FLIPS[orient]):
+		rev = (r.strand == "-") != flip
+		out.append((H.revcomp(r.seq) if flip else r.seq, rev, r.end if rev else r.pos))
+	(s1, rev1, p1), (s2, rev2, p2) = out
+	return s1, s2, insert_dir(pair.r1.contig, p1, rev1, pair.r2.contig, p2, rev2)
+
+
 # ---------------------------------------------------------------------------
 # Reference computations
 # ---------------------------------------------------------------------------
@@ -288,15 +306,30 @@ def pair_score(dp0, dp1, dist, avg, std, match_sc=2):
 	return int(s + .499)
 
 
-_PESTAT_CAND = re.compile(r"^\[M::mb_pestat\] # candidate unique pairs for \(FF, FR, RF, RR\): \((\d+), (\d+), (\d+), (\d+)\)$", re.M)
-_PESTAT_PCT = re.compile(r"^\[M::mb_pestat::(FF|FR|RF|RR)\] \(25, 50, 75\) percentile: \((-?\d+), (-?\d+), (-?\d+)\); mean and std\.dev: \(([-0-9.]+), ([-0-9.]+)\)$", re.M)
-_PESTAT_BND = re.compile(r"^\[M::mb_pestat::(FF|FR|RF|RR)\] low and high boundaries for proper pairs: \((-?\d+), (-?\d+)\); ([0-9.]+)/([0-9.]+)% pairs are below/above the boundaries$", re.M)
+# The insert-size report of mb_pestat on stderr is not documented, so it is parsed for its
+# numbers only: a line naming the four orientations followed by four counts; per orientation, a
+# line tagged ::FF/::FR/::RF/::RR with three integers then two decimals (quartiles; mean, std)
+# and one with two integers then two decimals (bounds; percentages below/above). The words
+# between the numbers are not matched, so rewording the messages does not break these tests.
+_INT = r"(-?\d+)"
+_DEC = r"(-?[0-9]+(?:\.[0-9]+)?)"
+_PESTAT_CAND = re.compile(r"^\[M::[^\]]*\][^(\n]*\(FF, FR, RF, RR\)\D*" + r"\D+".join([_INT] * 4) + r"\D*$", re.M)
+_PESTAT_PCT = re.compile(r"^\[M::[^\]\n]*::(FF|FR|RF|RR)\][^\n]*\(" + r", ".join([_INT] * 3) + r"\)[^(\n]*\(" + _DEC + r", " + _DEC +
+	r"\)[^(\n]*$", re.M)
+_PESTAT_BND = re.compile(r"^\[M::[^\]\n]*::(FF|FR|RF|RR)\][^(\n]*\(" + _INT + r", " + _INT + r"\)[^\d\n]*" + _DEC + r"/" + _DEC +
+	r"[^\n]*$", re.M)
 
 
 def stderr_pestat(stderr):
-	"""Parsed [M::mb_pestat] messages: a list (one per batch) of candidate counts, and dicts
-	{dir: (p25, p50, p75, "avg", "std")} and {dir: (lo, hi, "pct_lo", "pct_hi")} over all batches."""
+	"""Parsed [M::...] insert-size messages: a list (one per batch) of candidate counts (FF, FR, RF, RR),
+	and lists of (dir, (p25, p50, p75, "avg", "std")) and (dir, (lo, hi, "pct_lo", "pct_hi")) over all
+	batches, the decimals kept as printed."""
 	cands = [tuple(int(x) for x in m.groups()) for m in _PESTAT_CAND.finditer(stderr)]
 	pct = [(m.group(1), (int(m.group(2)), int(m.group(3)), int(m.group(4)), m.group(5), m.group(6))) for m in _PESTAT_PCT.finditer(stderr)]
 	bnd = [(m.group(1), (int(m.group(2)), int(m.group(3)), m.group(4), m.group(5))) for m in _PESTAT_BND.finditer(stderr)]
 	return cands, pct, bnd
+
+
+def has_pestat_report(stderr):
+	"""Whether stderr carries any insert-size statistics (a batch that inferred them)."""
+	return stderr_pestat(stderr) != ([], [], [])
