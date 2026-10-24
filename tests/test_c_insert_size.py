@@ -34,20 +34,21 @@ def _flags_by_pair(sam, pairs):
 
 @pytest.fixture(scope="module")
 def ins_genome(index_of):
-	"""Two random contigs and an exact 300 bp repeat with one copy on each."""
+	"""Two random contigs and an exact 300 bp repeat with two copies 6 kbp apart on chrA."""
 	pg = C.PlantedGenome(301, [("chrA", 150000), ("chrB", 60000)])
 	rep = pg.random(300)
 	pg.plant("chrA", 140000, rep)
-	pg.plant("chrB", 50000, rep)
+	pg.plant("chrA", 146000, rep)
 	g = pg.genome()
 	return g, index_of(g)
 
 
 def _mixed_pairs(g):
 	"""Unique pairs in FR (60), RF (25) and FF (3) orientation, plus pairs that must not count
-	as candidates: a mate in the exact repeat (MAPQ 0), mates on two contigs, a chimeric read 1
-	(two primary hits), a distance of exactly max_pe_ins (10000), and two random mates. One
-	FR pair at distance 9999 counts (outlier)."""
+	as candidates: a mate in the exact repeat (MAPQ 0; either copy would be in range), mates on
+	two contigs (once at nearby coordinates), a chimeric read 1 (two primary hits), a distance
+	of exactly max_pe_ins (10000), and two random mates. One FR pair at distance 9999 counts
+	(outlier)."""
 	rng = H.Rng(77)
 	counted, other = [], []
 	for i in range(60):
@@ -68,6 +69,7 @@ def _mixed_pairs(g):
 	# read 2 inside the repeat: two equally good hits, SE MAPQ 0
 	other.append(C.pair_at(g, "rep", "chrA", 139700, False, "chrA", 140000 + 250, True))
 	other.append(C.pair_at(g, "inter", "chrA", 60500, False, "chrB", 40000, True))
+	other.append(C.pair_at(g, "inter_near", "chrA", 30500, False, "chrB", 30900, True))
 	# chimeric read 1: 75 bp from chrA, 75 bp from chrB
 	p = C.fr_pair(g, "chim", "chrA", 75000, 400)
 	seq = g["chrA"][75000:75075] + g["chrB"][36000:36075]

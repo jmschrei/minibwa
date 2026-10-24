@@ -34,9 +34,10 @@ def api_input(index_of, tmp_path_factory):
 			subs1=UNSEED if i == 1 else ())
 		pairs.append(p)
 		kind[p.name] = "rescue%d" % (1 if i == 1 else 2)
-	p = C.fr_pair(g, "far", "chrA", 32000, 700)
-	pairs.append(p)
-	kind[p.name] = "improper"
+	for name, ins in (("far", 700), ("far2", 580)):  # beyond hi (560); 580 is too close for rescue to clip
+		p = C.fr_pair(g, name, "chrA", 32000 if name == "far" else 41000, ins)
+		pairs.append(p)
+		kind[p.name] = "improper"
 	p = C.fr_pair(g, "rnd", "chrA", 35000, 400)
 	p.r2 = C.Mate("rnd", C.PlantedGenome(802, [("x", 150)])["x"], "I" * 150, None, 0, 0, False, [])
 	pairs.append(p)

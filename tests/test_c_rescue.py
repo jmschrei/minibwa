@@ -10,6 +10,7 @@ reverse mate within [s+lo-len, s+hi); for a reverse anchor ending at e, a
 forward mate within [e-hi, e-lo+len).
 """
 
+import math
 import re
 
 import pytest
@@ -350,3 +351,75 @@ def test_dbg_aln_pe_reports_rescue(rescue_genome, window_run, tmp_path):
 	assert acc, lines[k + 3]
 	assert acc.group(5) == "150M" == m.cigar
 	assert toff + int(acc.group(2)) == m.pos0 == p.mate.ts
+
+
+def _high_cov_build():
+	"""Read 1 comes from an exact 2-copy duplication (D1, D2). Read 2 has no seed at its true
+	locus T next to D1 (a substitution every 15 bases); a copy T' with one more substitution
+	lies next to D2. Read 2's last 60 bases (as sequenced) occur exactly at five places on chrB,
+	more than -c 3, so they count as high-occurrence sequence."""
+	pg = C.PlantedGenome(502, [("chrA", 40000), ("chrB", 20000)])
+	d = pg.random(150)
+	t = pg.random(150)
+	r = C.substitute(t, UNSEED)  # read 2 on the forward strand
+	pg.plant("chrA", 5000, d)
+	pg.plant("chrA", 20000, d)
+	pg.plant("chrA", 5250, t)
+	pg.plant("chrA", 20250, C.substitute(t, [100]))
+	other = "A" if r[60] != "A" else "C"  # the base after each copy breaks the match
+	for k in range(5):
+		pg.plant("chrB", 2000 + 3000 * k, r[:60] + other)
+	g = pg.genome()
+	r1 = C.Mate("hc", d, C._qual("hc1", 150), "chrA", 5000, 5150, False, [])
+	r2 = C.Mate("hc", H.revcomp(r), C._qual("hc2", 150), "chrA", 5250, 5400, True, UNSEED)
+	return g, C.Pair("hc", r1, r2)
+
+
+def test_rescued_hit_shares_high_occurrence_fraction(index_of, tmp_path):
+	"""The pair MAPQ is scaled by 1 - (f1 + f2)/2, with f the fraction of each read covered by
+	seeds occurring more than -c times. A rescued hit counts the same fraction as its read's
+	other hits (60 of 150 bases here) although rescue found it without seeds. Read 1's MAPQ
+	equals the recomputation with f2 = int(255*60/150)/255, from the pair scores of (D1, T) and
+	(D2, T') and the alignments in the output."""
+	g, p = _high_cov_build()
+	idx = index_of(g)
+	f1, f2 = C.write_pairs_c(str(tmp_path), [p])
+	res = H.run_map(idx, [f1, f2], ["-c", "3", "-I", "400,40", "--outn=50", "--outs=0"])
+	sam = res.sam()
+	recs1 = [r for r in sam.records if r.segment == 1]
+	recs2 = [r for r in sam.records if r.segment == 2]
+	a = [r for r in recs1 if r.is_primary][0]
+	b = [r for r in recs2 if r.is_primary][0]
+	assert (a.rname, a.pos0, b.rname, b.pos0, b.cigar) == ("chrA", 5000, "chrA", 5250, "150M")
+	assert a.is_proper_pair and b.is_proper_pair and b.tags["NM"] == 10
+	d2 = [r for r in recs1 if r.pos0 == 20000]
+	t2 = [r for r in recs2 if r.rname == "chrA" and r.pos0 == 20250]
+	assert len(d2) == 1 and len(t2) == 1 and sum(r.rname == "chrB" for r in recs2) >= 1
+	dp = lambda r: r.tags["ms"]
+	s1 = C.pair_score(dp(a), dp(b), b.ref_end0 - a.pos0, 400, 40)
+	s2 = C.pair_score(dp(d2[0]), dp(t2[0]), t2[0].ref_end0 - d2[0].pos0, 400, 40)
+	assert s1 > s2 >= s1 - 14
+	diff = min(s1 - s2, s1 + 8 - (dp(d2[0]) + dp(t2[0])))
+	blen = lambda r: sum(n for n, op in r.cigar_ops if op in "MID")
+	ident = float(2 * 150 - a.tags["NM"] - b.tags["NM"]) / (blen(a) + blen(b))
+	mq = max(0, int(6.02 * ident * ident * diff / 2 - 4.343 * math.log(3) + .499))
+	f2 = int(255. * 60 / 150)
+	mq = min(60, int(mq * (1. - .5 * (0 + f2 / 255.)) + .499))
+	assert 5 <= mq < 60
+	assert a.mapq == int(.8 * mq + .499)
+
+
+def test_rescue_window_with_lowest_bound(rescue_genome, tmp_path):
+	"""-I 100,50 gives lo = max(100-200, 1) = 1, so the window of a forward anchor at s starts at
+	s+1-len: an unseedable mate lying entirely before the anchor (facing away from it) is outside
+	and stays unmapped, while one at insert 1 (touching the anchor's 5' base) is rescued."""
+	g, scen, idx = rescue_genome
+	s7, s9 = scen["hough"]
+	s = s9 + 1000
+	out = C.pair_at(g, "lo_out", "chrA", s, False, "chrA", s - 50, True, subs2=UNSEED)
+	one = C.fr_pair(g, "lo_one", "chrA", s + 600, 1, subs2=UNSEED)
+	f1, f2 = C.write_pairs_c(str(tmp_path), [out, one])
+	prim = H.run_map(idx, [f1, f2], ["-I", "100,50"]).sam().primaries()
+	assert prim[("lo_out", 2)].is_unmapped
+	m = prim[("lo_one", 2)]
+	assert (m.rname, m.pos0, m.strand, m.cigar) == ("chrA", one.r2.ts, "-", "150M")

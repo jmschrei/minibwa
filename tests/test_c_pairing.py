@@ -26,7 +26,8 @@ A, B, Q, E = 2, 8, 12, 2
 
 def _build():
 	pg = C.PlantedGenome(401, [("chrA", 150000), ("chrB", 50000)])
-	plans = []  # (name, read 1 as (contig, 5' position, reverse), read 2's sequence x or None, x's strand or read 2 as (contig, 5', reverse))
+	plans = []  # (name, read 1 as (contig, 5' position, reverse), x, y): read 2 is x on the reverse strand if y, else
+	# on the forward strand; or x is None and y gives read 2 as (contig, 5' position, reverse)
 	b = 2000
 
 	def block():
@@ -45,12 +46,27 @@ def _build():
 			pg.plant("chrA", ts, x)
 		anchor = ("chrA", e if anchor_rev else s, anchor_rev)
 		plans.append(("A%d" % k, anchor, x, not anchor_rev))
-	# E: a fragment inside an exact 700 bp segmental duplication; two equally good pairs
+	# E: a fragment inside an exact 700 bp segmental duplication; two equally good pairs. A third
+	# copy of read 2 on chrB has, next to it, a copy of read 1 without seeds (8 substitutions, one
+	# every 19 bases): only mate rescue could find it, and rescue is skipped when the two best
+	# pairs tie.
 	dup = pg.random(700)
 	s = block()
 	pg.plant("chrA", s, dup)
 	pg.plant("chrB", 3000, dup)
+	pg.plant("chrB", 40000 + 600 - 150, dup[500:650])
+	pg.plant("chrB", 40000, C.substitute(dup[50:200], C.unseedable_subs(step=19, first=9)))
 	plans.append(("E0", ("chrA", s + 50, False), None, ("chrA", s + 50 + 600, True)))
+	# R: both reads have two exact copies, but only one combination pairs; the pair MAPQ is
+	# then capped by the pair score plus 4*A minus the sum of the second-best single-end scores
+	x = pg.random(150)
+	y = pg.random(150)
+	s = block()
+	pg.plant("chrA", s, y)
+	pg.plant("chrB", 30000, y)
+	pg.plant("chrA", s + 600 - 150, x)
+	pg.plant("chrB", 35000, x)
+	plans.append(("R0", ("chrA", s, False), x, True))
 	# F: read 2 has one copy within the bounds and one on chrB
 	x = pg.random(150)
 	s = block()
@@ -58,12 +74,14 @@ def _build():
 	pg.plant("chrB", 10000, x)
 	plans.append(("F0", ("chrA", s, False), x, True))
 	# C: read 2 differs from its chrB copy at one base and from the copy near read 1 at three;
-	# the pair wins only if -U is large enough
-	x = pg.random(150)
-	s = block()
-	pg.plant("chrB", 20000, C.substitute(x, [75]))
-	pg.plant("chrA", s + 600 - 150, C.substitute(x, [40, 80, 120]))
-	plans.append(("C0", ("chrA", s, False), x, True))
+	# the pair wins only if -U is large enough. In C1 the insert size (670) puts the pair score
+	# exactly 2*U below the single-end scores at the threshold U.
+	for k, ins in enumerate((600, 670)):
+		x = pg.random(150)
+		s = block()
+		pg.plant("chrB", 20000 + k * 1000, C.substitute(x, [75]))
+		pg.plant("chrA", s + ins - 150, C.substitute(x, [40, 80, 120]))
+		plans.append(("C%d" % k, ("chrA", s, False), x, True))
 	# G: a plain unique pair, and one with read 1 reverse
 	s = block()
 	plans.append(("G0", ("chrA", s, False), None, ("chrA", s + 500, True)))
@@ -194,11 +212,12 @@ def test_single_end_hits_as_designed(pairing):
 	E's mates two hits each, and the G pairs one hit per mate."""
 	g, pairs, idx, f1, f2, se = pairing
 	hits = _se_hits(se)
-	n_copies = {"A0": 2, "A1": 2, "A2": 2, "A3": 2, "A4": 3, "A5": 3, "A6": 3, "F0": 2, "C0": 2}
+	n_copies = {"A0": 2, "A1": 2, "A2": 2, "A3": 2, "A4": 3, "A5": 3, "A6": 3, "F0": 2, "C0": 2, "C1": 2}
 	for name, n in n_copies.items():
 		assert len(hits[(name, 2)]) == n, name
 		assert len(hits[(name, 1)]) == 1, name
-	assert len(hits[("E0", 1)]) == len(hits[("E0", 2)]) == 2
+	assert len(hits[("E0", 1)]) == 2 and len(hits[("E0", 2)]) == 3
+	assert len(hits[("R0", 1)]) == len(hits[("R0", 2)]) == 2
 	for name in ("G0", "G1"):
 		assert len(hits[(name, 1)]) == len(hits[(name, 2)]) == 1
 
@@ -230,33 +249,44 @@ def test_closest_copy_to_mean_insert_wins(pairing):
 
 def test_tied_pairs_keep_mates_together(pairing):
 	"""A fragment from an exact segmental duplication pairs on one copy (both mates on the
-	same contig, proper, MAPQ 0)."""
+	same contig, proper, MAPQ 0). With two equally good pairs minibwa skips mate rescue (one
+	of the README's "heuristics to skip unnecessary mate rescue"): read 1 gains no hit next
+	to read 2's third, unpaired copy, where only rescue could place it. -U 50 lowers the
+	rescue's minimum score (sum of read 1's scores / A - U = 100) below that copy's local score
+	(142 matches - 8 * 4 = 110), so it is the skip, not the score, that keeps it out."""
 	g, pairs, idx, f1, f2, se = pairing
-	prim = H.run_map(idx, [f1, f2], ["-I", I_OPT]).sam().primaries()
+	res = H.run_map(idx, [f1, f2], ["-I", I_OPT, "-U", "50", "--outn=50", "--outs=0"])
+	prim = res.sam().primaries()
 	a, b = prim[("E0", 1)], prim[("E0", 2)]
 	assert a.rname == b.rname and a.is_proper_pair and b.is_proper_pair
 	assert (a.mapq, b.mapq) == (0, 0)
 	assert abs(a.tlen) == 600
+	r1 = [r for r in res.sam().records if r.qname == "E0" and r.segment == 1]
+	assert sorted((r.rname, r.pos0) for r in r1) == sorted((h.contig, h.ts) for h in _se_hits(se)[("E0", 1)])
 
 
 def test_unpair_penalty_threshold(pairing):
 	"""-U sets the penalty for leaving a pair unpaired. Scenario C pairs only when the pair score
 	is at least the best single-end scores minus U*A: below the threshold U* (from the
 	single-end scores) read 2 stays on its better chrB hit without 0x2, at U* it moves next to
-	read 1 with 0x2."""
+	read 1 with 0x2. In C1 the pair score equals the single-end scores minus U*A exactly."""
 	g, pairs, idx, f1, f2, se = pairing
 	hits = _se_hits(se)
-	h1, h2 = hits[("C0", 1)], hits[("C0", 2)]
-	near = [h for h in h2 if h.contig == "chrA"][0]
-	far = [h for h in h2 if h.contig == "chrB"][0]
-	best = C.pair_score(h1[0].dp, near.dp, near.te - h1[0].ts, AVG, STD, A)
-	score_se = h1[0].dp + far.dp
-	u_star = -(-(score_se - best) // A)
-	assert 2 <= u_star <= 30
-	pc = [p for p in pairs if p.name == "C0"]
-	for U, paired in ((u_star - 1, False), (u_star, True)):
-		res = H.run_map(idx, [f1, f2], ["-I", I_OPT, "-U", U])
-		_check_run(pc, hits, res, U)
-		prim = res.sam().primaries()
-		b = prim[("C0", 2)]
-		assert (b.rname == "chrA") == paired and b.is_proper_pair == paired, (U, b.line[:100])
+	n_equal = 0
+	for name in ("C0", "C1"):
+		h1, h2 = hits[(name, 1)], hits[(name, 2)]
+		near = [h for h in h2 if h.contig == "chrA"][0]
+		far = [h for h in h2 if h.contig == "chrB"][0]
+		best = C.pair_score(h1[0].dp, near.dp, near.te - h1[0].ts, AVG, STD, A)
+		score_se = h1[0].dp + far.dp
+		u_star = -(-(score_se - best) // A)
+		assert 2 <= u_star <= 30
+		n_equal += best == score_se - u_star * A
+		pc = [p for p in pairs if p.name == name]
+		for U, paired in ((u_star - 1, False), (u_star, True)):
+			res = H.run_map(idx, [f1, f2], ["-I", I_OPT, "-U", U])
+			_check_run(pc, hits, res, U)
+			prim = res.sam().primaries()
+			b = prim[(name, 2)]
+			assert (b.rname == "chrA") == paired and b.is_proper_pair == paired, (name, U, b.line[:100])
+	assert n_equal == 1
