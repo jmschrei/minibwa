@@ -475,6 +475,9 @@ $$
 where $\theta_l$ is the long-read value and $\theta_s$ is the short-read value.
 We hardcode $\ell_{\rm min}=100$ and $\ell_{\rm mid}=2000$.
 The length-adjusted parameter $\theta(\ell)$ reaches $(\theta_s+\theta_l)/2$ at $\ell=\ell_{\rm mid}$.
+This formula is applied to the maximum number hits for base alignment, in range $[5,50]$.
+It is also used for several other parameters for chaining and the Z-drop heuristic that are explained in our previous work~\citep{Li:2018ab,Li:2021ab} but not in this article.
+We refer the readers to the documentation and the source code for details.
 
 \subsection{Mapping directional bisulfite sequencing reads}\label{sec:meth}
 
