@@ -1480,7 +1480,7 @@ def md_from_minibwa(md):
 	"""The MD value minibwa writes for a spec-form MD (no trailing 0 after a final mismatch or deletion).
 
 	The SAMtags regex [0-9]+(([A-Z]|\\^[A-Z]+)[0-9]+)* requires the final 0;
-	base minibwa (cs.c, mb_write_MD) omits it. Use only to compare against
+	minibwa r427 (cs.c, mb_write_MD) omits it. Use only to compare against
 	minibwa's MD, never to excuse a different discrepancy.
 	"""
 	return md[:-1] if md.endswith("0") and len(md) > 1 and not md[-2].isdigit() else md
@@ -1659,7 +1659,7 @@ def check_pinned(name, text, max_diff_lines=40):
 	"""Compare text with tests/pins/<name>; MINIBWA_TEST_UPDATE_PINS=1 rewrites the pin.
 
 	A name ending in .gz is stored gzip-compressed. Pins are generated on
-	base minibwa; a test using this must say "pins the current output" in
+	current minibwa; a test using this must say "pins the current output" in
 	its docstring.
 	"""
 	path = os.path.join(PINS_DIR, name)
@@ -1668,7 +1668,7 @@ def check_pinned(name, text, max_diff_lines=40):
 		_write_text(path, text, name.endswith(".gz"))
 		return
 	if not os.path.exists(path):
-		raise AssertionError("missing pin %s; create it on base minibwa with MINIBWA_TEST_UPDATE_PINS=1" % path)
+		raise AssertionError("missing pin %s; create it on current minibwa with MINIBWA_TEST_UPDATE_PINS=1" % path)
 	with _open_in(path) as f:
 		want = f.read()
 	if want != text:

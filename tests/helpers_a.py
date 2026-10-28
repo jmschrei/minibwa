@@ -338,7 +338,7 @@ def make_tiny():
 	has 14 exact copies of its own; t3 holds ten copies of a 60 bp F4 that contains F2, so
 	an F4 match occurs exactly 10 times (minibwa's sub-SMEM limit) and F2 24 times; there
 	is a 300 bp lowercase stretch with an F1 copy in it, a 30 bp poly-A, a (CA)20 tract, a
-	30 bp N run and scattered IUPAC codes. No contig ends in an ambiguous base: base minibwa leaves a
+	30 bp N run and scattered IUPAC codes. No contig ends in an ambiguous base: minibwa r427 leaves a
 	contig's final run of ambiguous bases out of the .l2b ambiguity list, so l2b_getseq
 	returns the random bases there instead of 4. Returns (contigs, features) with contigs
 	a list of (name, seq) and features a dict of named positions."""
@@ -488,10 +488,10 @@ def tiny_reads(contigs, feats, ref):
 	for p in (420, 560, 1000, 1650, 1800):
 		add("oddsub", g["t1"][p - 22:p + 19])
 	# past either end of the text T = F + revcomp(F): a base, then the start of T (the start
-	# of t1); the end of T (revcomp of t1's start), then a base. Base minibwa extends a size-1
-	# interval at the sentinel's row by one base that is not there
-	# (known-bugs/a-rank2a-sentinel-row.md, r1-rank2a-text-start.md), so the base next to the
-	# text end is never that one: these reads check everything else about the text ends.
+	# of t1); the end of T (revcomp of t1's start), then a base. minibwa r427 extends a size-1
+	# interval at the sentinel's row by one base that is not there (reported in the issue
+	# linked from the pull request that added the tests), so the base next to the text end
+	# is never that one: these reads check everything else about the text ends.
 	bug = ref.bwt_full()[ref.primary() + 1]
 	for c in range(4):
 		if c == bug:

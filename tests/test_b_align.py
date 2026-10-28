@@ -134,8 +134,9 @@ def test_cs(synth, se, lr, which):
 
 
 def test_md(synth, se):
-	"""MD:Z equals its recomputation (N against N counts as a match, as in cs; base minibwa
-	omits the final 0 after a terminal mismatch, see known-bugs/md-trailing-zero.md)."""
+	"""MD:Z equals its recomputation (N against N counts as a match, as in cs; minibwa r427
+	omits the final 0 after a terminal mismatch, reported in the issue linked from the pull
+	request that added the tests)."""
 	sam = se["md"].sam()
 	n = 0
 	for rec in sam.records:

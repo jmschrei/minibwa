@@ -66,7 +66,7 @@ def _check_record(rec, genome, info, segment):
 def test_single_end_bs_reads(synth, bs):
 	"""Single-end reads are read 1 (C->T): OT reads map forward and OB reads reverse at their true positions
 	with MAPQ >= 30; NM excludes conversions (0 for reads without other differences, whose AS is then 300)
-	while MD:Z shows them as mismatches (the recomputed MD, without the final 0 base minibwa omits)."""
+	while MD:Z shows them as mismatches (the recomputed MD, without the final 0 that minibwa r427 omits)."""
 	sam = bs.se.sam()
 	prim = sam.primaries()
 	assert len(prim) == len(bs.pairs)

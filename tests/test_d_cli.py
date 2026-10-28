@@ -6,7 +6,9 @@ wording of error and warning messages is not documented, so a test only
 checks that a diagnostic line (a stderr line other than the `[M::...]`
 progress lines) appears and, where the message carries it, that it names the
 offending option or value. Exit codes not stated anywhere (an unreadable
-read file, an unwritable output file) are not asserted; see known-bugs/.
+read file, an unwritable output file) are not asserted; minibwa r427 exits 0
+in both cases (reported in the issue linked from the pull request that added
+the tests).
 """
 
 import gzip
@@ -111,7 +113,7 @@ def test_presets_are_applied_before_other_options():
 	(["-x", "nonexistent"], "nonexistent"),
 ], ids=["long", "short", "preset"])
 def test_map_option_errors(synth, reads, argv, name):
-	"""An unknown option or preset exits 1 with an error naming it (base: `[ERROR] unknown option in "..."`,
+	"""An unknown option or preset exits 1 with an error naming it (r427: `[ERROR] unknown option in "..."`,
 	`[ERROR] unknown preset '...'`) and writes nothing to stdout."""
 	r = _run(["map"] + argv + [synth.index, reads["fq"]])
 	assert r.returncode == 1 and r.stdout == ""
@@ -119,7 +121,7 @@ def test_map_option_errors(synth, reads, argv, name):
 
 
 def test_map_missing_option_argument(synth, reads):
-	"""An option missing its argument exits 1 with an error on stderr (base: `[ERROR] missing option argument`)."""
+	"""An option missing its argument exits 1 with an error on stderr (r427: `[ERROR] missing option argument`)."""
 	for argv in (["map", synth.index, reads["fq"], "-t"], ["map", synth.index, reads["fq"], "--outn"]):
 		r = _run(argv)
 		assert r.returncode == 1 and r.stdout == ""
@@ -128,7 +130,7 @@ def test_map_missing_option_argument(synth, reads):
 
 @pytest.mark.parametrize("cmd", ["map", "mem"])
 def test_missing_index_aborts(reads, tmp_path, cmd):
-	"""A missing index aborts (SIGABRT) with an error on stderr (base: `[E::main_<cmd>] failed to load the
+	"""A missing index aborts (SIGABRT) with an error on stderr (r427: `[E::main_<cmd>] failed to load the
 	index. ABORT!`) before any output."""
 	r = H.run_minibwa([cmd, str(tmp_path / "nope"), reads["fq"]])
 	assert r.returncode == SIGABRT and r.stdout == ""
@@ -143,8 +145,9 @@ def test_meth_needs_meth_index(synth, reads):
 
 
 def test_unreadable_reads(synth, tmp_path):
-	"""A read file that cannot be opened gives an error naming it (base: `ERROR: failed to open file '<name>'`)
-	and only the SAM header (the exit status is not asserted; see known-bugs/map-missing-reads-exit-0.md)."""
+	"""A read file that cannot be opened gives an error naming it (r427: `ERROR: failed to open file '<name>'`)
+	and only the SAM header (the exit status is not asserted: minibwa r427 exits 0 here, as reported in
+	the issue linked from the pull request that added the tests)."""
 	missing = str(tmp_path / "missing.fq")
 	r = _run(["map", synth.index, missing])
 	assert any(missing in l for l in _diag(r.stderr))
@@ -153,7 +156,7 @@ def test_unreadable_reads(synth, tmp_path):
 
 def test_main_reports_version_and_command(synth, reads):
 	"""After a successful command with arguments, main() reports MB_VERSION and the command line on stderr
-	(base: `[M::main] Version: ...`, `[M::main] CMD: ...`). Wording and timing lines are not asserted."""
+	(r427: `[M::main] Version: ...`, `[M::main] CMD: ...`). Wording and timing lines are not asserted."""
 	r = H.run_map(synth.index, reads["fq"])
 	lines = r.stderr.splitlines()
 	assert any(l.endswith(" " + D.mb_version()) for l in lines)
@@ -185,7 +188,7 @@ def test_output_file(synth, reads, tmp_path):
 	("--long", "long", False)])
 def test_yes_or_no(synth, reads, opt, name, flag_effect):
 	"""Options taking yes/no accept yes, y, no and n; any other value prints a warning naming the option
-	(base: `[WARNING] option '--<name>' only accepts 'yes' or 'no'.`) and leaves the setting as it was. --pe=no
+	(r427: `[WARNING] option '--<name>' only accepts 'yes' or 'no'.`) and leaves the setting as it was. --pe=no
 	(or n) stops interleaved reads with equal names from being paired; --pe=yes (or y) is the default."""
 	base = H.strip_pg(H.run_map(synth.index, reads["il"]).stdout)
 	bad = H.run_map(synth.index, reads["il"], ["%s=maybe" % opt])

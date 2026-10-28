@@ -257,8 +257,9 @@ def test_statistics_in_all_four_orientations(ins_genome, tmp_path):
 	"""A library mixing all four orientations (30 pairs each from chrB: FR, FF with read 2 reversed, RR
 	with read 1 reversed, RF with both) infers statistics for every orientation, each equal to the
 	Python recomputation from the true 5' positions (helpers_c.reorient); FR and RF pairs within their
-	bounds are proper. (Same-strand pairs are not checked for 0x2: see
-	known-bugs/r2-same-strand-orientation-labels.md.)"""
+	bounds are proper. (Same-strand pairs are not checked for 0x2: in an FF or RR library, minibwa r427
+	never marks the pairs from reverse-strand fragments proper, as reported in the issue linked from the
+	pull request that added the tests.)"""
 	g, idx = ins_genome
 	pairs = []
 	for k, (orient, ins) in enumerate((("FR", 300), ("FF", 280), ("RR", 320), ("RF", 520))):
@@ -324,7 +325,8 @@ def test_statistics_are_inferred_per_batch(ins_genome, tmp_path):
 # ---------------------------------------------------------------------------
 
 # option, (avg, std, hi, lo) by the documented defaults: std = round(avg/10), hi = avg + 4*std,
-# lo = avg - 4*std raised to 1 (the code's max(); minibwa.1 says min(), see known-bugs)
+# lo = avg - 4*std raised to 1 (the code's max(); minibwa.1 says min(), a discrepancy reported
+# in the issue linked from the pull request that added the tests)
 INS_OPTS = [
 	("500", (500, 50, 700, 300)),
 	("500,20", (500, 20, 580, 420)),

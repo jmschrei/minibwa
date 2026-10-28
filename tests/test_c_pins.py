@@ -6,8 +6,8 @@ insert-size inference, pairing among repeat copies, mate rescue, pair MAPQ,
 The genome has diverged repeat families (so pairing decides between copies
 and the pair MAPQ depends on the insert-size statistics) and the reads
 include chimeric read 1s (so -5 changes primaries), mates without seeds
-(rescue) and random mates. Each test pins the current output of base minibwa
-(74bdd48); regenerate with MINIBWA_TEST_UPDATE_PINS=1 only on base minibwa.
+(rescue) and random mates. Each test pins the current output of minibwa r427
+(74bdd48); regenerate with MINIBWA_TEST_UPDATE_PINS=1 only on current minibwa.
 """
 
 import pytest

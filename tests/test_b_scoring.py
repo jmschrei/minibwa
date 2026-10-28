@@ -50,8 +50,9 @@ def test_gap_open_and_extension(bgen, tmp_path):
 	pairs) 72 -> 228; -O 6,30 -E 3,1: min(96, 60) -> 240; -O 16 -E 2 -> 224.
 	A 1 bp insertion (149 matches): 298 - 14 = 284; -O 6 -E 1: 291; -A 1: 149 - 14 = 135;
 	-A 3: 447 - 14 = 433. ms charges any gap q+e in short-read mode: 300 - 14 = 286.
-	(Pairs with O1 >= O2 or E1 <= E2 are not tested: base minibwa does not apply the
-	documented cost to them, see known-bugs/r1-dual-gap-penalty-order.md.)"""
+	(Pairs with O1 >= O2 or E1 <= E2 are not tested: minibwa r427 does not apply the
+	documented cost to them, as reported in the issue linked from the pull request that
+	added the tests.)"""
 	g = bgen["b1"]
 	u = _clean_deletion(g, bgen.unique_start + 1000, 75, 30)
 	s = g[u:u + 75] + g[u + 105:u + 180]

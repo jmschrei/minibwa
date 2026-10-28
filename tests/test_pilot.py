@@ -107,7 +107,7 @@ def test_synth_se_unique_reads_land_at_truth(synth, se_run):
 		assert rec.mapq >= 20
 		assert H.cigar_query_span(rec.cigar) == len(truth[q].seq)
 		md = H.compute_md(synth.genome[rec.rname], rec.pos0, rec.seq, rec.cigar)
-		# base minibwa omits the final 0 after a terminal mismatch, which the SAMtags MD regex requires
+		# minibwa r427 omits the final 0 after a terminal mismatch, which the SAMtags MD regex requires
 		assert rec.tags["MD"] in (md, H.md_from_minibwa(md))
 
 

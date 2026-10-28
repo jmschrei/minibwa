@@ -6,9 +6,10 @@ Every public name in `minibwa.h`, every function the mapping path reaches
 `map-main.c`), and the debugging subcommands that expose the seeding code.
 Source revision: 74bdd48 (r427). Line numbers are for that revision.
 
-Each row has an owner area. A writer ticks `[x]` in the last column when a
-test covers the row, or writes `n/a` with a reason (for example "internal:
-not observable without pinning implementation details", or "not reached").
+Each row belongs to one area (see the split below). The last column says
+whether a test covers the row (`[x]`), covers it partly, or is `n/a` with a
+reason (for example "internal: not observable without pinning
+implementation details", or "not reached").
 Several rows can be covered by one test; name the test in Notes if useful.
 
 ## Area split
@@ -20,25 +21,24 @@ Several rows can be covered by one test; name the test in Notes if useful.
 | C | paired-end and Hi-C: pe.c, insert-size inference and `-I`, `-P`, `--rescue`, `--pe`, `-U`, `--hic`, `-5`, proper-pair flags and every mate field written by format.c, the paired branch of `mb_map_batch` | `tests/test_c_*.py`, `tests/c/drv_c*.c`, `tests/pins/c_*` |
 | D | output, CLI and API: the rest of format.c (SAM/PAF records and header, `-R -H -u -Y --outn --outs --xa --xa-ratio -o -f -a`), `main()`/`main_map()`/`main_mem()` parsing and errors, `--version --help`, `--mmap`, `--meth`, `--kalloc`, thread and batch invariance (`-t`, `-K`), kthread, the libminibwa API and every name in minibwa.h | `tests/test_d_*.py`, `tests/c/drv_d*.c`, `tests/pins/d_*` |
 
-Changes from the split in the brief, from reading the source:
+Notes on the split, from reading the source:
 
 * `--adap` is in B, not C. It toggles `MB_F_ADAP`, which only selects the
   read-length-dependent parameter scaling in `mb_opt_adap()` (options.c) and
   `mb_is_sr_mode()`; nothing in pe.c reads it. It belongs with `-x adap` and `-l`.
-* map-algo.c is not in the brief's file list but holds the core of the mapping
-  path (`mb_map_sai`, hit selection, MAPQ, the API). Hit processing and MAPQ
-  go to B, the API functions to D, `mb_sync_high_cov` (only called by
-  `mb_pair`) to C.
+* map-algo.c holds the core of the mapping path (`mb_map_sai`, hit
+  selection, MAPQ, the API). Hit processing and MAPQ go to B, the API
+  functions to D, `mb_sync_high_cov` (only called by `mb_pair`) to C.
 * The mate half of `mb_fmt_sam` (RNEXT, PNEXT, TLEN, flags 0x1/0x2/0x8/0x20/0x40/0x80,
-  MC:Z, MQ:i, placement of an unmapped mate) goes to C, since the brief gives
-  C "proper-pair flags, mate fields"; the rest of format.c is D.
+  MC:Z, MQ:i, placement of an unmapped mate) goes to C, which covers
+  the proper-pair flags and mate fields; the rest of format.c is D.
 * `--meth` touches seed.c, l2bit.c, align.c and pe.c. Its functions
   (`l2b_intv2cid_meth`, `l2b_meth_convert`, `l2b_meth_rev`,
-  `mb_anchor_split_meth`) stay with D, which owns `--meth`, so one writer
-  owns the BS-seq fixture.
+  `mb_anchor_split_meth`) stay with D, which owns `--meth`, so the BS-seq
+  fixture stays in one area.
 * `--mmap` loaders (`mb_idx_load_mmap`, `l2b_load_mmap`,
   `mb_bwt_load_mmap`, `kom_mmap_file`) go to D with the option.
-* `-K` appears twice in the brief. A owns how `-K NUM1[,NUM2]` cuts batches
+* `-K` is split between two areas. A owns how `-K NUM1[,NUM2]` cuts batches
   (bseq.c); D owns output invariance across `-t` and `-K`.
 * `minibwa mem` reaches the same mapping path, so its options are rows (D).
 * `fastmap`, `getref` and `bench` are debugging subcommands; they are A's

@@ -42,8 +42,6 @@ CC=$E/bin/clang CPATH=$E/include LIBRARY_PATH=$E/lib LD_LIBRARY_PATH=$E/lib \
 `CPATH` and `LIBRARY_PATH` are read by the compiler for headers and
 libraries (`zlib.h`, `-lz`, `-fopenmp`), and `LD_LIBRARY_PATH` lets the
 built `minibwa` and the drivers load `libz.so` and `libomp.so` at run time.
-For the suite's runs `E` was
-`/home/jmschrei/auto-optimization/2026-10-24-chromap-speed/toolchains/clang`.
 
 ### AddressSanitizer
 
@@ -58,11 +56,11 @@ MINIBWA_TEST_MAKE_ARGS="asan=1 MALLOC_O=" CC="gcc -fsanitize=address" \
 	ASAN_OPTIONS=detect_leaks=0 python3 -m pytest tests
 ```
 
-On base minibwa the whole suite passes this way with no ASan error. With
-leak detection on, `minibwa getref` and `minibwa fastmap` report memory
-still allocated at exit, and the tests that run them fail on the exit code
-(known-bugs/r1-asan-findings.md); `minibwa map` returning early on an
-invalid `-R` line reports such memory too (known-bugs/r2-asan-findings.md).
+On minibwa r427 the whole suite passes this way with no ASan error. With
+leak detection on, LeakSanitizer reports memory still allocated at exit
+from `minibwa getref` and `minibwa fastmap`, and the tests that run them
+fail on the exit code; it reports such memory too when `minibwa map`
+returns early on an invalid `-R` line.
 
 | Variable | Default | Meaning |
 |:---------|:--------|:--------|
@@ -74,7 +72,7 @@ invalid `-R` line reports such memory too (known-bugs/r2-asan-findings.md).
 | `MINIBWA_TEST_MAKE_ARGS` | unset | extra `make` arguments for the build, e.g. `asan=1 MALLOC_O=` (part of the cache key) |
 | `MINIBWA_TEST_THREADS` | 1 | `-t` for tests that do not set it themselves |
 | `MINIBWA_TEST_TIMEOUT` | 120 | seconds before one minibwa or driver process is killed |
-| `MINIBWA_TEST_UPDATE_PINS` | unset | `1` rewrites pinned outputs (only on base minibwa) |
+| `MINIBWA_TEST_UPDATE_PINS` | unset | `1` rewrites pinned outputs (only on current minibwa) |
 | `MBT_VERBOSE` | unset | C drivers also print passing checks |
 
 `MINIBWA_BIN` replaces only the binary. The C drivers always link a
@@ -218,7 +216,7 @@ the public API.
   truth, the SAM specification. A test that only records the current output
   says so in its docstring ("pins the current output") and carries the
   `pinned` marker; keep these few.
-* No test of behaviour base minibwa gets wrong. Such behaviour is reported
+* No test of behaviour minibwa r427 gets wrong. Such behaviour is reported
   separately, not tested.
 * No dependence on platform, compiler, Python version or thread count unless
   the test is explicitly about thread-count invariance (`thread_invariance`
@@ -272,7 +270,7 @@ the public API.
   exit status is 0; do not assert that exit status.
 * Three adjacent reads with the same name (or two same-named pairs in
   two-file input) in paired-end mode fail an assertion and abort.
-* MD:Z: base minibwa omits the final `0` when the alignment ends with a
+* MD:Z: minibwa r427 omits the final `0` when the alignment ends with a
   mismatch (`150T` instead of `150T0`). Compare with
   `md_from_minibwa(compute_md(...))`.
 * TLEN is the 5'-to-5' template length (`tlen_5prime`); the SAM spec leaves
@@ -304,22 +302,23 @@ the public API.
   of the CIGAR, but keeps the cost of an indel that `mb_fix_cigar` slides to
   the read start and then drops (seen in (CTT)n tracts).
 * `-O`/`-E` pairs get the documented cost min(O1+k*E1, O2+k*E2) only when
-  O1 < O2 and E1 > E2 (known-bugs/r1-dual-gap-penalty-order.md).
+  O1 < O2 and E1 > E2 (reported in the issue linked from the pull request
+  that added the tests).
 * A size-1 SA interval at the sentinel's row is extended by one base that is
-  not there (known-bugs/a-rank2a-sentinel-row.md, r1-rank2a-text-start.md):
-  reads that run past the start or the end of the indexed text
-  F + revcomp(F) can get SMEMs that do not exist. Test reads there avoid the
-  triggering base.
+  not there: reads that run past the start or the end of the indexed text
+  F + revcomp(F) can get SMEMs that do not exist (reported in the issue
+  linked from the pull request that added the tests). Test reads there
+  avoid the triggering base.
 * Pair orientations: `mb_pestat` labels a same-strand pair FF or RR by read
   order, but pairing looks it up by coordinate order, so in an FF-only (or
   RR-only) library the pairs from reverse-strand fragments are never proper
-  (known-bugs/r2-same-strand-orientation-labels.md). FR and RF libraries are
-  not affected.
+  (reported in the issue linked from the pull request that added the
+  tests). FR and RF libraries are not affected.
 
 ## Coverage
 
 Line coverage of one run of the whole suite (450 tests, `MINIBWA_TEST_THREADS=4`)
-on a copy of base minibwa built with `CC="gcc --coverage"` and `-O0` (gcc 13,
+on a copy of minibwa r427 built with `CC="gcc --coverage"` and `-O0` (gcc 13,
 measured with gcovr 8.7). "CLI tests" counts what the `minibwa` processes
 executed, "C drivers" what the drivers in `c/` executed (the two were kept
 apart with `GCOV_PREFIX`), and "Both" their union. The mapping-path files

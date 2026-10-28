@@ -83,7 +83,7 @@ static void print_sai(const char *tag, const char *name, const mb_sai_t *p)
 /* args: <in.mbw>
  * prints N seq_len primary L2[1..4], then R k cnt[0..3] = mb_bwt_rank1a(k) for every row
  * boundary k in [0, seq_len+1]; checks mb_bwt_rank11 and mb_bwt_rank2a against it. The pair
- * (primary, primary+1) is skipped: base minibwa's rank2a counts the base of the row after
+ * (primary, primary+1) is skipped: minibwa r427's rank2a counts the base of the row after
  * the sentinel there, which makes forward extension run past the end of the text */
 static int case_rank(int argc, char *argv[])
 {
@@ -110,7 +110,7 @@ static int case_rank(int argc, char *argv[])
 		}
 	for (k = 0; k <= n + 1; ++k)
 		for (l = k; l <= n + 1 && l <= k + 300; ++l) {
-			if (k == bwt->primary && l == k + 1) continue; // wrong in base minibwa: counts the base after the sentinel row
+			if (k == bwt->primary && l == k + 1) continue; // wrong in minibwa r427: counts the base after the sentinel row
 			mb_bwt_rank2a(bwt, k, l, tk, tl);
 			for (c = 0; c < 4; ++c)
 				if (tk[c] != cnt[k][c] || tl[c] != cnt[l][c])

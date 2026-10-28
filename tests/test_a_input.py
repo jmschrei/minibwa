@@ -432,7 +432,7 @@ def test_two_files_pair_by_position_and_name(tiny, tmp_path):
 def test_copy_comment(tiny, tmp_path):
 	"""-y appends each read's FASTA/FASTQ comment verbatim as the last field of its SAM
 	records (mapped and unmapped) and of the PAF lines of mapped reads; without -y no
-	comment is written. (Base minibwa writes no comment on the PAF line of an unmapped
+	comment is written. (minibwa r427 writes no comment on the PAF line of an unmapped
 	read, so that line is not checked.)"""
 	t1 = dict(tiny.contigs)["t1"]
 	recs = [("c1", t1[100:220], "I" * 120, "BC:Z:ACGT\tXX:i:7"), ("c2", H.revcomp(t1[600:700]), "I" * 100, "plain words"),

@@ -7,7 +7,7 @@ up as a diff. The inputs are simulated from the standard synthetic genome
 (conftest.make_synth: repeats, low-complexity tracts, N runs, short contigs):
 short reads from anywhere in it, reads with N, IUPAC codes and lowercase
 bases, reads across contig junctions and a few long reads. Pins are created
-on base minibwa with MINIBWA_TEST_UPDATE_PINS=1.
+on current minibwa with MINIBWA_TEST_UPDATE_PINS=1.
 """
 
 import pytest
