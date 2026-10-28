@@ -30,6 +30,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <assert.h>
 
 #define KSORT_SWAP(type_t, a, b) { type_t t=(a); (a)=(b); (b)=t; }
@@ -127,8 +128,15 @@
 	{ \
 		rstype_t *i; \
 		int size = 1<<n_bits, m = size - 1; \
+		uint64_t x = 0, x0 = rskey(*beg); \
 		rsbucket_##name##_t *k, b[1<<RS_MAX_BITS], *be = b + size; \
 		assert(n_bits <= RS_MAX_BITS); \
+		/* a level whose keys all share the digit at s moves nothing and recurses into the same range: skip it */ \
+		for (i = beg + 1; i != end; ++i) x |= rskey(*i) ^ x0; \
+		while ((x >> s & m) == 0) { \
+			if (s == 0) return; \
+			s = s > n_bits? s - n_bits : 0; \
+		} \
 		for (k = b; k != be; ++k) k->b = k->e = beg; \
 		for (i = beg; i != end; ++i) ++b[rskey(*i)>>s&m].e; \
 		for (k = b + 1; k != be; ++k) \

@@ -372,3 +372,55 @@ int kom_munmap(void *base, size_t map_len) // a simple wrapper
 {
 	return munmap(base, map_len);
 }
+
+/*******************
+ * Parallel reader *
+ *******************/
+
+#include <errno.h>
+
+#define KOM_PREAD_CHUNK 0x1000000 // 16M per pread(); also keeps each call far below Darwin's 2GB limit
+
+typedef struct {
+	int fd, failed;
+	uint8_t *a;
+	uint64_t size;
+	off_t off;
+} kom_pread_t;
+
+static void kom_pread_worker(void *data, long i, int tid)
+{
+	kom_pread_t *p = (kom_pread_t*)data;
+	uint64_t st = (uint64_t)i * KOM_PREAD_CHUNK, en = st + KOM_PREAD_CHUNK < p->size? st + KOM_PREAD_CHUNK : p->size;
+	(void)tid;
+	while (st < en) {
+		ssize_t x = pread(p->fd, p->a + st, en - st, p->off + (off_t)st);
+		if (x < 0 && errno == EINTR) continue;
+		if (x <= 0) { p->failed = 1; return; }
+		st += x;
+	}
+}
+
+/* Read _size_ bytes at the current position of _fp_ into _a_ with pread()
+ * from up to _n_threads_ threads started by _pfor_, and leave _fp_ just past
+ * them. Return 0 on success, or -1, with _fp_ where it was, when the caller
+ * should read serially instead: a single thread, no _pfor_, a small read, a
+ * stream that is not a regular file (e.g. a pipe), a file too short to hold
+ * _size_ bytes, or a failed pread(). */
+int kom_fread_par(FILE *fp, void *a, uint64_t size, int n_threads, kom_pfor_f pfor)
+{
+	kom_pread_t p;
+	struct stat st;
+	off_t off;
+	long n;
+	if (n_threads <= 1 || pfor == 0 || size <= KOM_PREAD_CHUNK) return -1;
+	off = ftello(fp);
+	if (off < 0) return -1;
+	p.fd = fileno(fp);
+	if (p.fd < 0 || fstat(p.fd, &st) < 0 || !S_ISREG(st.st_mode) || (uint64_t)st.st_size < (uint64_t)off + size) return -1;
+	p.a = (uint8_t*)a, p.size = size, p.off = off, p.failed = 0;
+	n = (long)((size + KOM_PREAD_CHUNK - 1) / KOM_PREAD_CHUNK);
+	pfor(n_threads < n? n_threads : (int)n, kom_pread_worker, &p, n);
+	if (p.failed) return -1;
+	return fseeko(fp, off + (off_t)size, SEEK_SET) < 0? -1 : 0;
+}

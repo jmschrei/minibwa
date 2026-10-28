@@ -16,7 +16,26 @@ KRADIX_SORT_INIT(mb64, uint64_t, key_64, 8)
  * Index loading *
  *****************/
 
+/* mb_idx_load_mt() adds a MB_CACHE2_LEN-mer table beside the 10-mer one
+ * (mb_bwt_cache2) when it loads with threads a BWT of at least
+ * MB_CACHE2_MIN_SEQ bases (both strands): 4^12 entries of 32 bytes (512 MB),
+ * built in about 4^10 * 5 extensions; seeding output is the same with it */
+#ifndef MB_CACHE2_LEN
+#define MB_CACHE2_LEN 12
+#endif
+#ifndef MB_CACHE2_MIN_SEQ
+#define MB_CACHE2_MIN_SEQ (1ULL<<30)
+#endif
+#ifndef MB_CACHE2_MIN_THREADS
+#define MB_CACHE2_MIN_THREADS 2
+#endif
+
 mb_idx_t *mb_idx_load(const char *prefix, int32_t is_meth)
+{
+	return mb_idx_load_mt(prefix, is_meth, 1, 0);
+}
+
+mb_idx_t *mb_idx_load_mt(const char *prefix, int32_t is_meth, int n_threads, kom_pfor_f pfor)
 {
 	char *buf;
 	mb_idx_t *idx = 0;
@@ -24,16 +43,18 @@ mb_idx_t *mb_idx_load(const char *prefix, int32_t is_meth)
 	mb_bwt_t *bwt;
 	buf = kom_calloc(char, strlen(prefix) + 10);
 	strcat(strcpy(buf, prefix), ".l2b");
-	l2b = l2b_load(buf);
+	l2b = l2b_load_mt(buf, n_threads, pfor);
 	if (l2b == 0) goto end_idx_load;
 	if (is_meth) strcat(strcpy(buf, prefix), ".meth.mbw");
 	else strcat(strcpy(buf, prefix), ".mbw");
-	bwt = mb_bwt_load(buf);
+	bwt = mb_bwt_load_mt(buf, n_threads, pfor);
 	if (bwt == 0) {
 		l2b_destroy(l2b);
 		goto end_idx_load;
 	}
 	mb_bwt_cache(bwt, 10); // TODO: don't hard code this
+	if (n_threads >= MB_CACHE2_MIN_THREADS && bwt->seq_len >= MB_CACHE2_MIN_SEQ)
+		mb_bwt_cache2(bwt, MB_CACHE2_LEN, n_threads, pfor);
 	idx = kom_calloc(mb_idx_t, 1);
 	idx->is_meth = !!is_meth, idx->l2b = l2b, idx->bwt = bwt;
 end_idx_load:
@@ -575,7 +596,10 @@ static void mb_dbg_anchor(const mb_idx_t *idx, int qlen, int64_t n, const mb_anc
 	}
 }
 
-mb_hit_t *mb_map_sai(const mb_opt_t *opt, const mb_idx_t *idx, int64_t qlen, const char *seq0, l2b_meth_t mt, mb_sai_v *u, int32_t *n_hit_, mb_tbuf_t *b, const char *qname)
+/* Map one read from its seed intervals u. With sa NULL, mb_anchor() resolves
+ * their SA rows; otherwise u comes from mb_seed_sa_batch(), *sa points at the
+ * read's SA values in the array it returned and is moved to the next read's. */
+mb_hit_t *mb_map_sai_sa(const mb_opt_t *opt, const mb_idx_t *idx, int64_t qlen, const char *seq0, l2b_meth_t mt, mb_sai_v *u, uint64_t **sa, int32_t *n_hit_, mb_tbuf_t *b, const char *qname)
 {
 	const int32_t min_rechain_len = 1000;
 	const double min_rechain_ratio = 0.1;
@@ -607,7 +631,8 @@ mb_hit_t *mb_map_sai(const mb_opt_t *opt, const mb_idx_t *idx, int64_t qlen, con
 	// collect anchors
 	chn_pen_gap = opt->chain_gap_scale * .01 * opt->min_len;
 	if (kom_dbg_flag & MB_DBG_SEED) mb_dbg_seed(u->n, u->a, qname);
-	seed_ratio = mb_anchor(b->km, idx, u, opt->min_len, qlen, seq, mt, opt->max_occ, &v);
+	seed_ratio = sa? mb_anchor_sa(b->km, idx, u, sa, opt->min_len, qlen, seq, mt, opt->max_occ, &v)
+		: mb_anchor(b->km, idx, u, opt->min_len, qlen, seq, mt, opt->max_occ, &v);
 	kfree(b->km, u->a); // no longer needed
 	u->n = 0, u->a = 0;
 
@@ -638,6 +663,8 @@ mb_hit_t *mb_map_sai(const mb_opt_t *opt, const mb_idx_t *idx, int64_t qlen, con
 
 	// chain ordering
 	hit = mb_gen_hit(b->km, hash, qlen, idx->l2b, n_hit, w, a);
+	if (!(opt->flag & MB_F_NO_ALN) && n_hit > 0) // the best hit's target window loads during chain ordering
+		mb_hit_prefetch(opt, idx->l2b, qlen, &hit[0], a);
 	kfree(b->km, w);
 	mb_set_parent(b->km, opt->mask_level, opt->mask_len, n_hit, hit, sub_diff, 0);
 	mb_select_sub(b->km, opt->pri_ratio, opt->min_len * 2, opt->best_n, &n_hit, hit);
@@ -661,6 +688,11 @@ mb_hit_t *mb_map_sai(const mb_opt_t *opt, const mb_idx_t *idx, int64_t qlen, con
 	kfree(b->km, seq);
 	*n_hit_ = n_hit;
 	return hit;
+}
+
+mb_hit_t *mb_map_sai(const mb_opt_t *opt, const mb_idx_t *idx, int64_t qlen, const char *seq0, l2b_meth_t mt, mb_sai_v *u, int32_t *n_hit_, mb_tbuf_t *b, const char *qname)
+{
+	return mb_map_sai_sa(opt, idx, qlen, seq0, mt, u, 0, n_hit_, b, qname);
 }
 
 /*************************
@@ -698,6 +730,7 @@ mb_hit_t **mb_map_batch(const mb_opt_t *opt, const mb_idx_t *idx, int32_t n_seq,
 	mb_hit_t **hit;
 	mb_sai_v *sai;
 	uint8_t **seq4;
+	uint64_t *sa, *sa_p;
 	void *km;
 	int32_t i, j, k, sb_st, sb_len, sb_max, is_pe = !!(opt->flag & MB_F_PE), is_meth = !!(opt->flag & MB_F_METH);
 
@@ -730,7 +763,7 @@ mb_hit_t **mb_map_batch(const mb_opt_t *opt, const mb_idx_t *idx, int32_t n_seq,
 
 			// batch SMEM for sub-batch
 			memset(sai, 0, sb_n * sizeof(mb_sai_v));
-			mb_seed_intv_batch(km, idx->bwt, sb_n, &qlen[sb_st], seq4, opt->min_len, opt->max_sub_occ, sai);
+			sa = sa_p = mb_seed_sa_batch(km, idx, sb_n, &qlen[sb_st], seq4, opt->min_len, opt->max_sub_occ, opt->max_occ, sai); // mb_opt_adap() keeps max_occ
 			for (k = 0; k < sb_n; ++k) kfree(km, seq4[k]);
 
 			// map each sequence in sub-batch
@@ -739,8 +772,9 @@ mb_hit_t **mb_map_batch(const mb_opt_t *opt, const mb_idx_t *idx, int32_t n_seq,
 				mb_opt_t opt_adap;
 				l2b_meth_t mt = !is_meth? L2B_METH_NONE : !is_pe || (idx_k&1) == 0? L2B_METH_C2T : L2B_METH_G2A;
 				mb_opt_adap(opt, qlen[idx_k], &opt_adap);
-				hit[idx_k] = mb_map_sai(&opt_adap, idx, qlen[idx_k], seq[idx_k], mt, &sai[k], &n_hit[idx_k], b, qname? qname[idx_k] : 0);
+				hit[idx_k] = mb_map_sai_sa(&opt_adap, idx, qlen[idx_k], seq[idx_k], mt, &sai[k], sa? &sa_p : 0, &n_hit[idx_k], b, qname? qname[idx_k] : 0);
 			}
+			kfree(km, sa);
 
 			sb_st = i;
 			sb_len = 0;

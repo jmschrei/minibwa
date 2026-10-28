@@ -6,6 +6,94 @@
 
 static char mb_rg_id[256];
 
+/*******************
+ * Direct appends  *
+ *******************/
+
+/* The per-record writers below append each field directly instead of calling
+ * kom_sprintf_lite(), which parses its format string at run time. Every helper
+ * keeps room for a trailing NUL, as kom_sprintf_lite() does; the integer helpers
+ * print what kom_sprintf_lite()'s %d, %u and %ld print. */
+
+static __attribute__((noinline)) void str_grow(kstring_t *s, size_t l) // str_enlarge()'s rare path, out of line
+{
+	s->m = s->l + l + 1;
+	kom_roundup64(s->m);
+	s->s = kom_realloc(char, s->s, s->m);
+}
+
+static inline void str_enlarge(kstring_t *s, size_t l)
+{
+	if (s->l + l + 1 > s->m) str_grow(s, l);
+}
+
+static inline void str_putsn(kstring_t *s, const char *p, size_t l)
+{
+	str_enlarge(s, l);
+	memcpy(&s->s[s->l], p, l);
+	s->l += l;
+}
+
+#define str_putlit(s, lit) str_putsn((s), (lit), sizeof(lit) - 1)
+
+static inline void str_puts(kstring_t *s, const char *p)
+{
+	str_putsn(s, p, strlen(p));
+}
+
+static inline void str_putc(kstring_t *s, int c)
+{
+	str_enlarge(s, 1);
+	s->s[s->l++] = c;
+}
+
+static const char mb_digits2[] =
+	"00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899";
+
+static __attribute__((noinline)) void str_putu32(kstring_t *s, uint32_t x) // %u; out of line, so the many call sites stay small
+{
+	char buf[12], *p = buf + 12;
+	while (x >= 100) {
+		uint32_t q = x / 100;
+		p -= 2, memcpy(p, &mb_digits2[(x - q * 100) * 2], 2);
+		x = q;
+	}
+	if (x >= 10) p -= 2, memcpy(p, &mb_digits2[x * 2], 2);
+	else *--p = '0' + x;
+	str_putsn(s, p, buf + 12 - p);
+}
+
+static __attribute__((noinline)) void str_putu64(kstring_t *s, uint64_t x) // %lu; out of line like str_putu32()
+{
+	char buf[24], *p = buf + 24;
+	while (x >= 100) {
+		uint64_t q = x / 100;
+		p -= 2, memcpy(p, &mb_digits2[(x - q * 100) * 2], 2);
+		x = q;
+	}
+	if (x >= 10) p -= 2, memcpy(p, &mb_digits2[x * 2], 2);
+	else *--p = '0' + x;
+	str_putsn(s, p, buf + 24 - p);
+}
+
+static inline void str_putd(kstring_t *s, int32_t x) // %d
+{
+	if (x < 0) str_putc(s, '-'), str_putu32(s, 0U - (uint32_t)x);
+	else str_putu32(s, (uint32_t)x);
+}
+
+static inline void str_putld(kstring_t *s, long x) // %ld
+{
+	if (x < 0) str_putc(s, '-'), str_putu64(s, 0UL - (unsigned long)x);
+	else str_putu64(s, (unsigned long)x);
+}
+
+static inline void str_put_tabd(kstring_t *s, int32_t x) // "\t%d"
+{
+	str_putc(s, '\t');
+	str_putd(s, x);
+}
+
 /**************
  * PAF output *
  **************/
@@ -13,36 +101,51 @@ static char mb_rg_id[256];
 static inline void write_tags(kstring_t *s, const mb_hit_t *p)
 {
 	int32_t nm = p->blen - p->mlen + p->p->n_ambi;
-	kom_sprintf_lite(s, "\tNM:i:%d\tAS:i:%d\tms:i:%d\tmd:i:%d", nm, p->p->dp_score, p->p->dp_max0, p->p->dp_max - p->p->dp_max2);
+	str_putlit(s, "\tNM:i:"), str_putd(s, nm);
+	str_putlit(s, "\tAS:i:"), str_putd(s, p->p->dp_score);
+	str_putlit(s, "\tms:i:"), str_putd(s, p->p->dp_max0);
+	str_putlit(s, "\tmd:i:"), str_putd(s, p->p->dp_max - p->p->dp_max2);
 }
 
 void mb_fmt_paf(kstring_t *s, const l2b_t *l2b, const mb_bseq1_t *t, const mb_hit_t *p, uint64_t opt_flag, int n_seg, int seg_idx)
 {
-	kom_sprintf_lite(s, "%s", t->name);
+	str_puts(s, t->name);
 	if (n_seg > 1 && seg_idx >= 0)
-		kom_sprintf_lite(s, "/%d", seg_idx + 1);
-	kom_sprintf_lite(s, "\t%ld", (long)t->l_seq);
+		str_putc(s, '/'), str_putd(s, seg_idx + 1);
+	str_putc(s, '\t'), str_putld(s, (long)t->l_seq);
 	if (p == 0) { // for unmapped reads
-		kom_sprintf_lite(s, "\t*\t*\t*\t*\t*\t*\t*\t0\t0\t0\n");
+		str_putlit(s, "\t*\t*\t*\t*\t*\t*\t*\t0\t0\t0\n");
+		s->s[s->l] = 0;
 		return;
 	}
-	kom_sprintf_lite(s, "\t%d\t%d\t%c\t%s\t%ld\t%ld\t%ld\t%d\t%d\t%d\ttp:A:%c\ts1:i:%d\tcm:i:%d",
-		p->qs, p->qe, p->rev? '-' : '+', l2b->ctg[p->tid].name, (long)l2b->ctg[p->tid].len, (long)p->ts, (long)p->te,
-		p->mlen, p->blen, p->mapq, p->parent == p->id? 'P' : 'S', p->score, p->cnt);
-	if (p->parent == p->id) kom_sprintf_lite(s, "\ts2:i:%d", p->subsc >= 0? p->subsc : 0);
+	str_put_tabd(s, p->qs);
+	str_put_tabd(s, p->qe);
+	str_putc(s, '\t'), str_putc(s, p->rev? '-' : '+');
+	str_putc(s, '\t'), str_puts(s, l2b->ctg[p->tid].name);
+	str_putc(s, '\t'), str_putld(s, (long)l2b->ctg[p->tid].len);
+	str_putc(s, '\t'), str_putld(s, (long)p->ts);
+	str_putc(s, '\t'), str_putld(s, (long)p->te);
+	str_put_tabd(s, p->mlen);
+	str_put_tabd(s, p->blen);
+	str_put_tabd(s, p->mapq);
+	str_putlit(s, "\ttp:A:"), str_putc(s, p->parent == p->id? 'P' : 'S');
+	str_putlit(s, "\ts1:i:"), str_putd(s, p->score);
+	str_putlit(s, "\tcm:i:"), str_putd(s, p->cnt);
+	if (p->parent == p->id) str_putlit(s, "\ts2:i:"), str_putd(s, p->subsc >= 0? p->subsc : 0);
 	if (p->p) {
 		write_tags(s, p);
 		if (p->p->n_cigar > 0) {
 			int32_t i;
-			kom_sprintf_lite(s, "\tcg:Z:");
+			str_putlit(s, "\tcg:Z:");
 			for (i = 0; i < p->p->n_cigar; ++i)
-				kom_sprintf_lite(s, "%d%c", p->p->cigar[i]>>4, MB_CIGAR_STR[p->p->cigar[i]&0xf]);
+				str_putu32(s, p->p->cigar[i]>>4), str_putc(s, MB_CIGAR_STR[p->p->cigar[i]&0xf]);
 		}
-		if (p->p->cs) kom_sprintf_lite(s, "\t%s", (char*)&p->p->cigar[p->p->n_cigar]);
+		if (p->p->cs) str_putc(s, '\t'), str_puts(s, (char*)&p->p->cigar[p->p->n_cigar]);
 	}
 	if ((opt_flag & MB_F_COPY_COMMENT) && t->comment)
-		kom_sprintf_lite(s, "\t%s", t->comment);
-	kom_sprintf_lite(s, "\n");
+		str_putc(s, '\t'), str_puts(s, t->comment);
+	str_putc(s, '\n');
+	s->s[s->l] = 0;
 }
 
 /**************
@@ -126,15 +229,6 @@ int mb_fmt_sam_hdr(kstring_t *str, const l2b_t *idx, const char *rg, const char 
  * SAM output *
  **************/
 
-static inline void str_enlarge(kstring_t *s, int l)
-{
-	if (s->l + l + 1 > s->m) {
-		s->m = s->l + l + 1;
-		kom_roundup64(s->m);
-		s->s = kom_realloc(char, s->s, s->m);
-	}
-}
-
 static inline void str_copy(kstring_t *s, const char *st, const char *en)
 {
 	str_enlarge(s, en - st);
@@ -168,7 +262,7 @@ static inline const mb_hit_t *get_sam_pri(int n_hit, const mb_hit_t *hit)
 static void write_sam_cigar(kstring_t *s, int sam_flag, int in_tag, int qlen, const mb_hit_t *r, int64_t opt_flag)
 {
 	if (r->p == 0) {
-		kom_sprintf_lite(s, "*");
+		str_putc(s, '*');
 	} else {
 		uint32_t k, clip_len[2];
 		clip_len[0] = r->rev? qlen - r->qe : r->qs;
@@ -176,19 +270,19 @@ static void write_sam_cigar(kstring_t *s, int sam_flag, int in_tag, int qlen, co
 		if (in_tag) {
 			int clip_char = (((sam_flag&0x800) || ((sam_flag&0x100) && (opt_flag&MB_F_2ND_SEQ))) &&
 							 !(opt_flag&MB_F_SUPP_SOFT)) ? 5 : 4;
-			kom_sprintf_lite(s, "\tCG:B:I");
-			if (clip_len[0]) kom_sprintf_lite(s, ",%u", clip_len[0]<<4|clip_char);
+			str_putlit(s, "\tCG:B:I");
+			if (clip_len[0]) str_putc(s, ','), str_putu32(s, clip_len[0]<<4|clip_char);
 			for (k = 0; k < r->p->n_cigar; ++k)
-				kom_sprintf_lite(s, ",%u", r->p->cigar[k]);
-			if (clip_len[1]) kom_sprintf_lite(s, ",%u", clip_len[1]<<4|clip_char);
+				str_putc(s, ','), str_putu32(s, r->p->cigar[k]);
+			if (clip_len[1]) str_putc(s, ','), str_putu32(s, clip_len[1]<<4|clip_char);
 		} else {
 			int clip_char = (((sam_flag&0x800) || ((sam_flag&0x100) && (opt_flag&MB_F_2ND_SEQ))) &&
 							 !(opt_flag&MB_F_SUPP_SOFT)) ? 'H' : 'S';
 			assert(clip_len[0] < qlen && clip_len[1] < qlen);
-			if (clip_len[0]) kom_sprintf_lite(s, "%d%c", clip_len[0], clip_char);
+			if (clip_len[0]) str_putd(s, (int32_t)clip_len[0]), str_putc(s, clip_char);
 			for (k = 0; k < r->p->n_cigar; ++k)
-				kom_sprintf_lite(s, "%d%c", r->p->cigar[k]>>4, MB_CIGAR_STR[r->p->cigar[k]&0xf]);
-			if (clip_len[1]) kom_sprintf_lite(s, "%d%c", clip_len[1], clip_char);
+				str_putu32(s, r->p->cigar[k]>>4), str_putc(s, MB_CIGAR_STR[r->p->cigar[k]&0xf]);
+			if (clip_len[1]) str_putd(s, (int32_t)clip_len[1]), str_putc(s, clip_char);
 		}
 	}
 }
@@ -209,7 +303,7 @@ void mb_fmt_sam(void *km, kstring_t *s, const l2b_t *l2b, const mb_bseq1_t *t, i
 	} else r_prev = r_next = NULL;
 
 	// write QNAME and FLAG
-	kom_sprintf_lite(s, "%s", t->name);
+	str_puts(s, t->name);
 	flag = n_seg > 1? 0x1 : 0x0;
 	if (r == 0) {
 		flag |= 0x4;
@@ -225,17 +319,19 @@ void mb_fmt_sam(void *km, kstring_t *s, const l2b_t *l2b, const mb_bseq1_t *t, i
 		if (r_next == NULL) flag |= 0x8;
 		else if (r_next->rev) flag |= 0x20;
 	}
-	kom_sprintf_lite(s, "\t%d", flag);
+	str_put_tabd(s, flag);
 
 	// write coordinate, MAPQ and CIGAR
 	if (r == 0) {
 		if (r_prev) {
 			this_tid = r_prev->tid, this_pos = r_prev->ts;
-			kom_sprintf_lite(s, "\t%s\t%d\t0\t*", l2b->ctg[this_tid].name, this_pos+1);
-		} else kom_sprintf_lite(s, "\t*\t0\t0\t*");
+			str_putc(s, '\t'), str_puts(s, l2b->ctg[this_tid].name);
+			str_put_tabd(s, this_pos+1), str_putlit(s, "\t0\t*");
+		} else str_putlit(s, "\t*\t0\t0\t*");
 	} else {
 		this_tid = r->tid, this_pos = r->ts;
-		kom_sprintf_lite(s, "\t%s\t%d\t%d\t", l2b->ctg[r->tid].name, r->ts+1, r->mapq);
+		str_putc(s, '\t'), str_puts(s, l2b->ctg[r->tid].name);
+		str_put_tabd(s, (int32_t)(r->ts+1)), str_put_tabd(s, r->mapq), str_putc(s, '\t');
 		write_sam_cigar(s, flag, 0, t->l_seq, r, opt->flag);
 	}
 
@@ -249,65 +345,66 @@ void mb_fmt_sam(void *km, kstring_t *s, const l2b_t *l2b, const mb_bseq1_t *t, i
 					int next_pos5 = r_next->rev? r_next->te - 1 : r_next->ts;
 					tlen = next_pos5 - this_pos5;
 				}
-				kom_sprintf_lite(s, "\t=\t");
-			} else kom_sprintf_lite(s, "\t%s\t", l2b->ctg[r_next->tid].name);
-			kom_sprintf_lite(s, "%d\t", r_next->ts + 1);
+				str_putlit(s, "\t=\t");
+			} else str_putc(s, '\t'), str_puts(s, l2b->ctg[r_next->tid].name), str_putc(s, '\t');
+			str_putd(s, (int32_t)(r_next->ts + 1)), str_putc(s, '\t');
 		} else if (r_next) { // && this_tid < 0
-			kom_sprintf_lite(s, "\t%s\t%d\t", l2b->ctg[r_next->tid].name, r_next->ts + 1);
+			str_putc(s, '\t'), str_puts(s, l2b->ctg[r_next->tid].name);
+			str_put_tabd(s, (int32_t)(r_next->ts + 1)), str_putc(s, '\t');
 		} else if (this_tid >= 0) { // && r_next == NULL. In this case, mate is unmapped and placed at this segment's primary alignment
 			const mb_hit_t *r_pri;
 			r_pri = get_sam_pri(n_h, h);
 			if (r->tid == r_pri->tid)
-				kom_sprintf_lite(s, "\t=\t%d\t", r_pri->ts + 1);
+				str_putlit(s, "\t=\t"), str_putd(s, (int32_t)(r_pri->ts + 1)), str_putc(s, '\t');
 			else
-				kom_sprintf_lite(s, "\t%s\t%d\t", l2b->ctg[r_pri->tid].name, r_pri->ts + 1);
-		} else kom_sprintf_lite(s, "\t*\t0\t"); // neither has coordinates
+				str_putc(s, '\t'), str_puts(s, l2b->ctg[r_pri->tid].name), str_put_tabd(s, (int32_t)(r_pri->ts + 1)), str_putc(s, '\t');
+		} else str_putlit(s, "\t*\t0\t"); // neither has coordinates
 		if (tlen > 0) ++tlen;
 		else if (tlen < 0) --tlen;
-		kom_sprintf_lite(s, "%d\t", tlen);
-	} else kom_sprintf_lite(s, "\t*\t0\t0\t");
+		str_putd(s, tlen), str_putc(s, '\t');
+	} else str_putlit(s, "\t*\t0\t0\t");
 
 	// write SEQ and QUAL
 	if (r == 0) {
 		sam_write_sq(s, t->seq, t->l_seq, 0, 0);
-		kom_sprintf_lite(s, "\t");
+		str_putc(s, '\t');
 		if (t->qual) sam_write_sq(s, t->qual, t->l_seq, 0, 0);
-		else kom_sprintf_lite(s, "*");
+		else str_putc(s, '*');
 	} else {
 		if ((flag & 0x900) == 0 || (opt->flag & MB_F_SUPP_SOFT)) {
 			sam_write_sq(s, t->seq, t->l_seq, r->rev, r->rev);
-			kom_sprintf_lite(s, "\t");
+			str_putc(s, '\t');
 			if (t->qual) sam_write_sq(s, t->qual, t->l_seq, r->rev, 0);
-			else kom_sprintf_lite(s, "*");
+			else str_putc(s, '*');
 		} else if ((flag & 0x100) && !(opt->flag & MB_F_2ND_SEQ)){
-			kom_sprintf_lite(s, "*\t*");
+			str_putlit(s, "*\t*");
 		} else {
 			sam_write_sq(s, t->seq + r->qs, r->qe - r->qs, r->rev, r->rev);
-			kom_sprintf_lite(s, "\t");
+			str_putc(s, '\t');
 			if (t->qual) sam_write_sq(s, t->qual + r->qs, r->qe - r->qs, r->rev, 0);
-			else kom_sprintf_lite(s, "*");
+			else str_putc(s, '*');
 		}
 	}
 
 	// write tags
-	if (mb_rg_id[0]) kom_sprintf_lite(s, "\tRG:Z:%s", mb_rg_id);
-	if (n_seg > 2) kom_sprintf_lite(s, "\tFI:i:%d", seg_idx);
+	if (mb_rg_id[0]) str_putlit(s, "\tRG:Z:"), str_puts(s, mb_rg_id);
+	if (n_seg > 2) str_putlit(s, "\tFI:i:"), str_putd(s, seg_idx);
 	if (r) {
 		write_tags(s, r);
 		// MC:Z mate CIGAR and MQ:i mate MAPQ; r_next is the mate's primary (see above).
 		if (n_seg > 1 && r_next && r_next->p && r_next->p->n_cigar > 0 && mate_qlen > 0) {
-			kom_sprintf_lite(s, "\tMC:Z:");
+			str_putlit(s, "\tMC:Z:");
 			write_sam_cigar(s, 0, 0, mate_qlen, r_next, opt->flag);
-			kom_sprintf_lite(s, "\tMQ:i:%d", r_next->mapq);
+			str_putlit(s, "\tMQ:i:"), str_putd(s, r_next->mapq);
 		}
-		if (r->p->cs) kom_sprintf_lite(s, "\t%s", (char*)&r->p->cigar[r->p->n_cigar]);
+		if (r->p->cs) str_putc(s, '\t'), str_puts(s, (char*)&r->p->cigar[r->p->n_cigar]);
 		if (r->parent == r->id && r->p && n_h > 1 && h && r >= h && r - h < n_h) { // supplementary aln may exist
 			int i, n_sa = 0; // n_sa: number of SA fields
 			for (i = 0; i < n_h; ++i)
 				if (i != r - h && h[i].parent == h[i].id && h[i].p)
 					++n_sa;
 			if (n_sa > 0) {
-				kom_sprintf_lite(s, "\tSA:Z:");
+				str_putlit(s, "\tSA:Z:");
 				for (i = 0; i < n_h; ++i) {
 					const mb_hit_t *q = &h[i];
 					int l_M, l_I = 0, l_D = 0, clip5 = 0, clip3 = 0;
@@ -316,13 +413,15 @@ void mb_fmt_sam(void *km, kstring_t *s, const l2b_t *l2b, const mb_bseq1_t *t, i
 					else l_M = q->te - q->ts, l_I = (q->qe - q->qs) - l_M;
 					clip5 = q->rev? t->l_seq - q->qe : q->qs;
 					clip3 = q->rev? q->qs : t->l_seq - q->qe;
-					kom_sprintf_lite(s, "%s,%d,%c,", l2b->ctg[q->tid].name, q->ts+1, "+-"[q->rev]);
-					if (clip5) kom_sprintf_lite(s, "%dS", clip5);
-					if (l_M) kom_sprintf_lite(s, "%dM", l_M);
-					if (l_I) kom_sprintf_lite(s, "%dI", l_I);
-					if (l_D) kom_sprintf_lite(s, "%dD", l_D);
-					if (clip3) kom_sprintf_lite(s, "%dS", clip3);
-					kom_sprintf_lite(s, ",%d,%d;", q->mapq, q->blen - q->mlen + q->p->n_ambi);
+					str_puts(s, l2b->ctg[q->tid].name), str_putc(s, ',');
+					str_putd(s, (int32_t)(q->ts+1)), str_putc(s, ','), str_putc(s, "+-"[q->rev]), str_putc(s, ',');
+					if (clip5) str_putd(s, clip5), str_putc(s, 'S');
+					if (l_M) str_putd(s, l_M), str_putc(s, 'M');
+					if (l_I) str_putd(s, l_I), str_putc(s, 'I');
+					if (l_D) str_putd(s, l_D), str_putc(s, 'D');
+					if (clip3) str_putd(s, clip3), str_putc(s, 'S');
+					str_putc(s, ','), str_putd(s, q->mapq);
+					str_putc(s, ','), str_putd(s, q->blen - q->mlen + q->p->n_ambi), str_putc(s, ';');
 				}
 			}
 			if (opt->xa_max > 0) {
@@ -330,15 +429,16 @@ void mb_fmt_sam(void *km, kstring_t *s, const l2b_t *l2b, const mb_bseq1_t *t, i
 				for (i = 0; i < n_h; ++i)
 					if (i != r - h && h[i].parent == r - h && h[i].p->dp_max >= (double)opt->out_s * r->p->dp_max)
 						++n_xa;
-				if (n_xa > 0) kom_sprintf_lite(s, "\tn2:i:%d", n_xa);
+				if (n_xa > 0) str_putlit(s, "\tn2:i:"), str_putd(s, n_xa);
 				if (n_xa > 0 && n_xa <= opt->xa_max) {
-					kom_sprintf_lite(s, "\tXA:Z:");
+					str_putlit(s, "\tXA:Z:");
 					for (i = 0; i < n_h; ++i) {
 						const mb_hit_t *q = &h[i];
 						if (i != r - h && q->parent == r - h && q->p->dp_max >= (double)opt->out_s * r->p->dp_max) {
-							kom_sprintf_lite(s, "%s,%c%d,", l2b->ctg[q->tid].name, "+-"[q->rev], q->ts+1);
+							str_puts(s, l2b->ctg[q->tid].name), str_putc(s, ','), str_putc(s, "+-"[q->rev]);
+							str_putd(s, (int32_t)(q->ts+1)), str_putc(s, ',');
 							write_sam_cigar(s, 0, 0, t->l_seq, q, opt->flag);
-							kom_sprintf_lite(s, ",%d;", q->blen - q->mlen + q->p->n_ambi);
+							str_putc(s, ','), str_putd(s, q->blen - q->mlen + q->p->n_ambi), str_putc(s, ';');
 						}
 					}
 				}
@@ -347,8 +447,8 @@ void mb_fmt_sam(void *km, kstring_t *s, const l2b_t *l2b, const mb_bseq1_t *t, i
 	}
 
 	if ((opt->flag & MB_F_COPY_COMMENT) && t->comment)
-		kom_sprintf_lite(s, "\t%s", t->comment);
-	kom_sprintf_lite(s, "\n");
+		str_putc(s, '\t'), str_puts(s, t->comment);
+	str_putc(s, '\n');
 	s->s[s->l] = 0; // we always have room for an extra byte
 }
 

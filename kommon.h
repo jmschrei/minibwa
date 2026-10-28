@@ -2,6 +2,7 @@
 #define HL_HEADER
 
 #include <stdint.h>
+#include <stdio.h>
 
 #define kom_malloc(type, cnt)       ((type*)malloc((cnt) * sizeof(type)))
 #define kom_calloc(type, cnt)       ((type*)calloc((cnt), sizeof(type)))
@@ -59,6 +60,9 @@ double kom_percent_cpu(void);
 
 void *kom_mmap_file(const char *fn, size_t *len, int preload);
 int kom_munmap(void *base, size_t map_len);
+
+typedef void (*kom_pfor_f)(int n_threads, void (*func)(void*, long, int), void *data, long n); // the signature of kt_for()
+int kom_fread_par(FILE *fp, void *a, uint64_t size, int n_threads, kom_pfor_f pfor);
 
 extern uint8_t kom_nt4_table[256], kom_comp_table[256];
 void kom_revcomp(uint64_t len, char *seq);

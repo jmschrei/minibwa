@@ -216,27 +216,75 @@ static void mm_update_cigar_eqx(mb_hit_t *r, const uint8_t *qseq, const uint8_t 
 	r->p = p;
 }
 
+// nonzero unless the 8 bytes at a and at b are equal and each below 4 (eight exact A/C/G/T matches)
+static inline uint64_t mb_nomatch8(const uint8_t *a, const uint8_t *b)
+{
+	uint64_t x, y;
+	memcpy(&x, a, 8), memcpy(&y, b, 8);
+	return (x ^ y) | ((x | y) & 0xfcfcfcfcfcfcfcfcULL);
+}
+
 void mb_update_extra(void *km, mb_hit_t *r, const uint8_t *qseq, const uint8_t *tseq, const int8_t *mat, int8_t q, int8_t e, uint64_t opt_flag, int log_gap)
 {
 	uint32_t k, l;
 	int32_t qshift, tshift, toff = 0, qoff = 0, len4;
 	double s = 0.0, max = 0.0;
 	mb_extra_t *p = r->p;
+	int diag = mat[0], run_ok;
 	if (p == 0) return;
 	mb_fix_cigar(r, qseq, tseq, &qshift, &tshift);
 	qseq += qshift, tseq += tshift; // qseq and tseq may be shifted due to the removal of leading I/D
 	r->blen = r->mlen = 0;
+	// Without log_gap every score is an integer, so a run of exact A/C/G/T matches is added in one step when the
+	// four diagonal entries of mat are equal and non-negative: s is never negative and only grows along the run,
+	// so the run's maximum is its end value, and the sum is exact in a double
+	run_ok = (!log_gap && mat[0] == mat[6] && mat[0] == mat[12] && mat[0] == mat[18] && mat[0] >= 0);
 	for (k = 0; k < p->n_cigar; ++k) {
 		uint32_t op = p->cigar[k]&0xf, len = p->cigar[k]>>4;
 		if (op == MB_CIGAR_MATCH) {
 			int n_ambi = 0, n_diff = 0;
-			for (l = 0; l < len; ++l) {
-				int cq = qseq[qoff + l], ct = tseq[toff + l];
-				if (ct > 3 || cq > 3) ++n_ambi;
-				else if (ct != cq) n_diff += (mat[ct * 5 + cq] < 0);
-				s += mat[ct * 5 + cq];
-				if (s < 0) s = 0;
-				else max = max > s? max : s;
+			if (run_ok) {
+				const uint8_t *qs = &qseq[qoff], *ts = &tseq[toff];
+				for (l = 0; l < len; ++l) {
+					uint32_t l0 = l;
+					int cq, ct;
+					for (;;) { // find the end of the run of exact matches starting at l0
+						uint64_t z;
+						if (l + 8 > len) {
+							while (l < len && qs[l] == ts[l] && qs[l] < 4) ++l;
+							break;
+						}
+						if ((z = mb_nomatch8(&qs[l], &ts[l])) != 0) {
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+							l += __builtin_ctzll(z) >> 3;
+#else
+							while (qs[l] == ts[l] && qs[l] < 4) ++l;
+#endif
+							break;
+						}
+						l += 8;
+					}
+					if (l > l0) {
+						s += (double)(l - l0) * diag;
+						max = max > s? max : s;
+					}
+					if (l == len) break;
+					cq = qs[l], ct = ts[l]; // the base that ends the run: a mismatch or an ambiguous base
+					if (ct > 3 || cq > 3) ++n_ambi;
+					else if (ct != cq) n_diff += (mat[ct * 5 + cq] < 0);
+					s += mat[ct * 5 + cq];
+					if (s < 0) s = 0;
+					else max = max > s? max : s;
+				}
+			} else {
+				for (l = 0; l < len; ++l) {
+					int cq = qseq[qoff + l], ct = tseq[toff + l];
+					if (ct > 3 || cq > 3) ++n_ambi;
+					else if (ct != cq) n_diff += (mat[ct * 5 + cq] < 0);
+					s += mat[ct * 5 + cq];
+					if (s < 0) s = 0;
+					else max = max > s? max : s;
+				}
 			}
 			r->blen += len - n_ambi, r->mlen += len - (n_ambi + n_diff), p->n_ambi += n_ambi;
 			toff += len, qoff += len;
@@ -373,7 +421,10 @@ static void mb_align_pair(void *km, const mb_opt_t *opt, int qlen, const uint8_t
 	} else if (opt->q == opt->q2 && opt->e == opt->e2) { // affine gap
 		ksw_extz2_sse(km, qlen, qseq, tlen, tseq, 5, mat, opt->q, opt->e, w, zdrop * opt->a, end_bonus, ksw_flag, ez);
 	} else { // dual affine gap
-		ksw_extd2_sse(km, qlen, qseq, tlen, tseq, 5, mat, opt->q, opt->e, opt->q2, opt->e2, w, zdrop * opt->a, end_bonus, ksw_flag, ez);
+		// KSW_EZ_EXTZ_BOUND stops an extension earlier, leaving ez->score, mte and zdropped incomplete: no caller of an
+		// extension reads them, but --dbg-aln-seq prints the score
+		int bound = (ksw_flag & KSW_EZ_EXTZ_ONLY) && !(kom_dbg_flag & MB_DBG_ALN_SEQ)? KSW_EZ_EXTZ_BOUND : 0;
+		ksw_extd2_sse(km, qlen, qseq, tlen, tseq, 5, mat, opt->q, opt->e, opt->q2, opt->e2, w, zdrop * opt->a, end_bonus, ksw_flag|bound, ez);
 		//fprintf(stderr, "D2\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", tlen, qlen, !!(ksw_flag&KSW_EZ_EXTZ_ONLY), ez->max_t, ez->max_q, ez->max, ez->zdropped);
 	}
 	if (kom_dbg_flag & MB_DBG_ALN_SEQ) {
@@ -908,6 +959,7 @@ mb_hit_t *mb_align_skeleton(void *km, const mb_opt_t *opt, const mb_idx_t *mi, i
 	memset(&ez, 0, sizeof(ksw_extz_t));
 	for (i = 0; i < n_regs; ++i) {
 		mb_hit_t r2; // only used for inversion
+		if (i + 1 < n_regs) mb_hit_prefetch(opt, mi->l2b, qlen, &regs[i + 1], a); // the next hit's window, while this one aligns
 		mb_align1(km, opt, mi, qlen, qseq0, mt, &regs[i], &r2, n_a, a, &ez);
 		if (r2.cnt > 0) regs = mb_insert_reg(&r2, i, &n_regs, regs);
 		if (i > 0 && regs[i].split_inv) {

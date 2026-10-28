@@ -17,6 +17,7 @@
 #define KSW_EZ_SPLICE_FLANK 0x400
 #define KSW_EZ_SPLICE_CMPLX 0x800  // use the miniprot splice model
 #define KSW_EZ_SPLICE_SCORE 0x1000 // use splice score
+#define KSW_EZ_EXTZ_BOUND  0x2000 // with KSW_EZ_EXTZ_ONLY in ksw_extd2_sse: stop once no later cell can raise max or reach the query end above it; score, mte, zdropped and a non-end-reaching mqe are then incomplete
 
 #define KSW_LL_STOP  0x20000
 #define KSW_LL_SUBO  0x40000

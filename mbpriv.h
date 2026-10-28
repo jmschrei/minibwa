@@ -17,6 +17,8 @@
 #define MB_SEED_LONG_JOIN  0x1
 #define MB_SEED_IGNORE     0x2
 
+mb_idx_t *mb_idx_load_mt(const char *prefix, int32_t is_meth, int n_threads, kom_pfor_f pfor); // reads with up to n_threads threads via pfor (kt_for)
+
 struct mb_idx_s {
 	int32_t is_meth;
 	l2b_t *l2b;
@@ -56,6 +58,8 @@ void mb_bwtgen(const char *fn_pac, const char *fn_bwt, int block_size);
 void mb_seed_intv(void *km, const mb_bwt_t *bwt, int32_t len, const uint8_t *seq, int32_t min_len, int32_t max_sub_occ, mb_sai_v *v);
 void mb_seed_intv_batch(void *km, const mb_bwt_t *bwt, int32_t n_seq, const int32_t *len, uint8_t *const* seq, int32_t min_len, int32_t max_sub_occ, mb_sai_v *v);
 double mb_anchor(void *km, const mb_idx_t *idx, mb_sai_v *u, int32_t min_len, int32_t qlen, const uint8_t *qseq, l2b_meth_t mt, int32_t max_occ, mb_anchor_v *v);
+double mb_anchor_sa(void *km, const mb_idx_t *idx, const mb_sai_v *u, uint64_t **sa, int32_t min_len, int32_t qlen, const uint8_t *qseq, l2b_meth_t mt, int32_t max_occ, mb_anchor_v *v);
+uint64_t *mb_seed_sa_batch(void *km, const mb_idx_t *idx, int32_t n_seq, const int32_t *len, uint8_t *const* seq, int32_t min_len, int32_t max_sub_occ, int32_t max_occ, mb_sai_v *v);
 void mb_anchor_sort(const l2b_t *l2b, int64_t n_a, mb_anchor_t *a);
 
 // defined in lchain.c
@@ -78,6 +82,7 @@ void mb_split_hit(mb_hit_t *r, mb_hit_t *r2, int n, int qlen, mb_anchor_t *a, co
 void mb_set_mapq(void *km, int32_t qlen, int n_regs, mb_hit_t *regs, int min_chain_sc, int match_sc, int is_sr, int max_sr_len);
 
 mb_hit_t *mb_map_sai(const mb_opt_t *opt, const mb_idx_t *idx, int64_t qlen, const char *seq, l2b_meth_t mt, mb_sai_v *u, int32_t *n_hit_, mb_tbuf_t *b, const char *qname);
+mb_hit_t *mb_map_sai_sa(const mb_opt_t *opt, const mb_idx_t *idx, int64_t qlen, const char *seq, l2b_meth_t mt, mb_sai_v *u, uint64_t **sa, int32_t *n_hit_, mb_tbuf_t *b, const char *qname);
 
 void radix_sort_mb64(uint64_t *st, uint64_t *en);
 void radix_sort_mb128x(mb128_t *st, mb128_t *en);
@@ -139,6 +144,48 @@ static inline void mb_seq_rev(uint32_t len, uint8_t *seq)
 static inline int32_t mb_is_sr_mode(const mb_opt_t *opt, int32_t qlen)
 {
 	return (opt->flag & MB_F_LONG) || ((opt->flag & MB_F_ADAP) && qlen > opt->max_sr_len)? 0 : 1;
+}
+
+/* Prefetch the l2b pac lines of the target window that align.c:mb_align1()
+ * reads first for hit r, at most four 64-byte lines from its start: [ts0, te0)
+ * as mb_align1() computes it from r's first and last anchors (short reads), or
+ * the left-extension window below the first anchor (long reads). The first
+ * l2b_getseq() of a hit otherwise stalls on that miss. A hint only: nothing is
+ * read or written, so the window need not match mb_align1()'s exactly. Forced
+ * inline: gcc -O3 finds a function holding only prefetches const and drops the
+ * call. */
+static inline __attribute__((always_inline)) void mb_hit_prefetch(const mb_opt_t *opt, const l2b_t *l2b, int32_t qlen, const mb_hit_t *r, const mb_anchor_t *a)
+{
+	const mb_anchor_t *a0, *a1;
+	int64_t tid, ts, te, ts0, te0, l;
+	int32_t qs, qe, k;
+	uintptr_t p, last;
+	if (r->cnt <= 0 || r->inv) return;
+	a0 = &a[r->as], a1 = &a[r->as + r->cnt - 1];
+	tid = a0->sid >> 1;
+	if (tid < 0 || tid >= (int64_t)l2b->n_ctg) return;
+	ts = a0->tpos + 1 - a0->len, qs = a0->qpos + 1 - a0->len;
+	te = a1->tpos + 1, qe = a1->qpos + 1;
+	if (mb_is_sr_mode(opt, qlen)) {
+		l = qs;
+		l += l * opt->a + opt->end_bonus > opt->q? (l * opt->a + opt->end_bonus - opt->q) / opt->e : 0;
+		ts0 = ts - l;
+		l = qlen - qe;
+		l += l * opt->a + opt->end_bonus > opt->q? (l * opt->a + opt->end_bonus - opt->q) / opt->e : 0;
+		te0 = te + l;
+	} else {
+		l = qs < opt->max_gap? qs : opt->max_gap;
+		l += l * opt->a > opt->q? (l * opt->a - opt->q) / opt->e : 0;
+		l = l < opt->max_gap? l : opt->max_gap;
+		ts0 = ts - l, te0 = te;
+	}
+	if (ts0 < 0) ts0 = 0;
+	if (te0 > (int64_t)l2b->ctg[tid].len) te0 = l2b->ctg[tid].len;
+	if (ts0 >= te0) return;
+	p = (uintptr_t)&l2b->pac[(l2b->ctg[tid].off + ts0) >> 5] & ~(uintptr_t)63;
+	last = (uintptr_t)&l2b->pac[(l2b->ctg[tid].off + te0 - 1) >> 5];
+	for (k = 0; k < 4 && p <= last; ++k, p += 64)
+		__builtin_prefetch((const void*)p);
 }
 
 #ifdef __cplusplus

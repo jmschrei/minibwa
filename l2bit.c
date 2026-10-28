@@ -1,14 +1,62 @@
 #include <zlib.h>
 #include <stdio.h>
+#include <string.h>
 #include <assert.h>
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
 #include "kommon.h"
 #include "l2bit.h"
 #include "kseq.h"
 KSEQ_INIT(gzFile, gzread)
 
+#define L2B_BKT_SHIFT 20
+
+/* Build the bucket index (l2b_t::bkt_ctg and bkt_ambi). It needs contigs that tile [0, tot_len) in
+ * order and ambiguous intervals sorted by start and by end, which l2b_import and the loaders give;
+ * otherwise it is not built and the lookups binary-search the whole tables. */
+static void l2b_build_bkt(l2b_t *l2b)
+{
+	uint64_t i, j, b, x;
+	free(l2b->bkt_ctg); free(l2b->bkt_ambi);
+	l2b->n_bkt = 0, l2b->bkt_ctg = l2b->bkt_ambi = 0;
+	if (l2b->n_ctg >= UINT32_MAX || l2b->n_ambi >= UINT32_MAX) return;
+	for (i = 0, x = 0; i < l2b->n_ctg; ++i) {
+		if (l2b->ctg[i].off != x) return;
+		x += l2b->ctg[i].len;
+	}
+	if (x != l2b->tot_len) return;
+	for (i = 1; i < l2b->n_ambi; ++i)
+		if (l2b->ambi[i].st < l2b->ambi[i-1].st || l2b->ambi[i].en < l2b->ambi[i-1].en) return;
+	l2b->n_bkt = (l2b->tot_len >> L2B_BKT_SHIFT) + 1;
+	l2b->bkt_ctg = kom_malloc(uint32_t, l2b->n_bkt + 1);
+	l2b->bkt_ambi = kom_malloc(uint32_t, l2b->n_bkt + 1);
+	for (b = 0, i = j = 0; b <= l2b->n_bkt; ++b) {
+		uint64_t p = b << L2B_BKT_SHIFT;
+		while (i < l2b->n_ctg && l2b->ctg[i].off + l2b->ctg[i].len <= p) ++i;
+		while (j < l2b->n_ambi && l2b->ambi[j].en <= p) ++j;
+		l2b->bkt_ctg[b] = i, l2b->bkt_ambi[b] = j;
+	}
+}
+
 static int64_t l2b_pos2cid(const l2b_t *l2b, int64_t s, int64_t len, int64_t *cst)
 {
 	int64_t lo = 0, hi = l2b->n_ctg, mid;
+	if (l2b->bkt_ctg) { // contigs tile [0, tot_len): s is in the first contig that ends after s
+		const l2b_ctg_t *ctg;
+		uint64_t b;
+		if ((uint64_t)s >= l2b->tot_len) return -1; // s is in no contig
+		b = (uint64_t)s >> L2B_BKT_SHIFT;
+		lo = l2b->bkt_ctg[b], hi = l2b->bkt_ctg[b + 1]; // the answer is in [lo, hi]
+		while (lo < hi) {
+			mid = (lo + hi) >> 1;
+			if (l2b->ctg[mid].off + l2b->ctg[mid].len > (uint64_t)s) hi = mid;
+			else lo = mid + 1;
+		}
+		ctg = &l2b->ctg[lo];
+		*cst = s - ctg->off;
+		return s + len <= ctg->off + ctg->len? lo : -1;
+	}
 	while (lo < hi) {
 		const l2b_ctg_t *ctg;
 		mid = (lo + hi) / 2;
@@ -49,6 +97,53 @@ int64_t l2b_intv2cid_meth(const l2b_t *l2b, uint64_t st, uint64_t en, l2b_meth_t
 	return s < 0? -2 : l2b_pos2cid(l2b, s, len, cst);
 }
 
+#if defined(__SSE2__)
+static inline void l2b_dec32(const uint64_t *w, uint8_t *p) // write the 32 bases of pac word *w to p[0..31]
+{
+	__m128i x = _mm_loadl_epi64((const __m128i*)w), m = _mm_set1_epi8(3);
+	__m128i b0 = _mm_and_si128(x, m); // byte k of each b<j> is base 4k+j
+	__m128i b1 = _mm_and_si128(_mm_srli_epi16(x, 2), m);
+	__m128i b2 = _mm_and_si128(_mm_srli_epi16(x, 4), m);
+	__m128i b3 = _mm_and_si128(_mm_srli_epi16(x, 6), m);
+	__m128i b01 = _mm_unpacklo_epi8(b0, b1), b23 = _mm_unpacklo_epi8(b2, b3);
+	_mm_storeu_si128((__m128i*)p, _mm_unpacklo_epi16(b01, b23));
+	_mm_storeu_si128((__m128i*)(p + 16), _mm_unpackhi_epi16(b01, b23));
+}
+#else
+#define L2B_D1(x) { (x)&3, (x)>>2&3, (x)>>4&3, (x)>>6&3 }
+#define L2B_D4(x) L2B_D1(x), L2B_D1((x)+1), L2B_D1((x)+2), L2B_D1((x)+3)
+#define L2B_D16(x) L2B_D4(x), L2B_D4((x)+4), L2B_D4((x)+8), L2B_D4((x)+12)
+#define L2B_D64(x) L2B_D16(x), L2B_D16((x)+16), L2B_D16((x)+32), L2B_D16((x)+48)
+static const uint8_t l2b_dec4[256][4] = { L2B_D64(0), L2B_D64(64), L2B_D64(128), L2B_D64(192) }; // the 4 bases of a pac byte
+
+static inline void l2b_dec32(const uint64_t *w, uint8_t *p) // write the 32 bases of pac word *w to p[0..31]
+{
+	uint64_t x = *w;
+	int k;
+	for (k = 0; k < 8; ++k, x >>= 8)
+		memcpy(p + 4 * k, l2b_dec4[x & 0xff], 4);
+}
+#endif
+
+static void l2b_decode(const uint64_t *pac, int64_t st, int64_t en, uint8_t *seq) // bases [st,en), st<en, a pac word at a time
+{
+	uint8_t buf[32];
+	int64_t i = st, w = st >> 5;
+	int32_t r = st & 31;
+	if (r) { // the first word starts before st
+		int64_t n = en - st < 32 - r? en - st : 32 - r;
+		l2b_dec32(&pac[w++], buf);
+		memcpy(seq, buf + r, n);
+		seq += n, i += n;
+	}
+	for (; i + 32 <= en; i += 32, seq += 32)
+		l2b_dec32(&pac[w++], seq);
+	if (i < en) { // the last word ends after en
+		l2b_dec32(&pac[w], buf);
+		memcpy(seq, buf, en - i);
+	}
+}
+
 int64_t l2b_getseq(const l2b_t *l2b, int64_t tid, int64_t st, int64_t en, uint8_t *seq)
 {
 	const l2b_ctg_t *ctg;
@@ -60,8 +155,7 @@ int64_t l2b_getseq(const l2b_t *l2b, int64_t tid, int64_t st, int64_t en, uint8_
 	if (en > ctg->len) en = ctg->len;
 	st += ctg->off;
 	en += ctg->off;
-	for (i = st; i < en; ++i)
-		seq[i - st] = l2b_get0(l2b, i);
+	if (st < en) l2b_decode(l2b->pac, st, en, seq);
 	// retrieve ambiguous bases
 	aid = l2b_getambi(l2b, tid, st - ctg->off, en - ctg->off, &n_ambi);
 	if (aid >= 0) {
@@ -98,6 +192,19 @@ int64_t l2b_getambi(const l2b_t *l2b, int64_t tid, int64_t st, int64_t en, int32
 	if (st >= en) return -1;
 	g_beg = l2b->ctg[tid].off + st;
 	g_end = l2b->ctg[tid].off + en;
+
+	if (l2b->bkt_ambi) { // the first interval ending after g_beg is in [lo, hi]; the next ones overlap the window while they start before g_end
+		uint64_t b = (uint64_t)g_beg >> L2B_BKT_SHIFT;
+		lo = l2b->bkt_ambi[b], hi = l2b->bkt_ambi[b + 1];
+		while (lo < hi) {
+			mid = (lo + hi) >> 1;
+			if (l2b->ambi[mid].en > g_beg) hi = mid;
+			else lo = mid + 1;
+		}
+		for (i_st = i_en = lo; i_en < l2b->n_ambi && l2b->ambi[i_en].st < g_end; ++i_en) {}
+		*n_ambi = i_en - i_st;
+		return *n_ambi == 0? -1 : i_st;
+	}
 
 	lo = 0, hi = l2b->n_ambi;
 	while (lo < hi) {
@@ -225,11 +332,13 @@ l2b_t *l2b_import(const char *fn, uint64_t seed)
 	kseq_destroy(ks);
 	gzclose(fp);
 	l2b_collate_str(l2b);
+	l2b_build_bkt(l2b);
 	return l2b;
 }
 
 void l2b_destroy(l2b_t *l2b)
 {
+	free(l2b->bkt_ctg); free(l2b->bkt_ambi);
 	if (l2b->mmap) { // ambi/mask/pac/cat_name/cat_comm point into the mapped file
 		free(l2b->ctg); // ctg[] is always heap-allocated
 		kom_munmap(l2b->mmap, l2b->mmap_len);
@@ -274,6 +383,11 @@ int l2b_save(const char *fn, const l2b_t *l2b)
 
 l2b_t *l2b_load(const char *fn)
 {
+	return l2b_load_mt(fn, 1, 0);
+}
+
+l2b_t *l2b_load_mt(const char *fn, int n_threads, kom_pfor_f pfor)
+{
 	FILE *fp;
 	char magic[4], *p_name, *p_comm;
 	uint32_t dummy;
@@ -309,7 +423,8 @@ l2b_t *l2b_load(const char *fn)
 	l2b->cat_comm = kom_malloc(char, len_comm);
 	fread(l2b->ambi, 16, l2b->n_ambi, fp);
 	fread(l2b->mask, 16, l2b->n_mask, fp);
-	fread(l2b->pac, 8, l2b->n_pac, fp);
+	if (kom_fread_par(fp, l2b->pac, l2b->n_pac << 3, n_threads, pfor) < 0)
+		fread(l2b->pac, 8, l2b->n_pac, fp);
 	fread(l2b->cat_name, 1, len_name, fp);
 	fread(l2b->cat_comm, 1, len_comm, fp);
 	p_name = l2b->cat_name, p_comm = l2b->cat_comm;
@@ -322,6 +437,7 @@ l2b_t *l2b_load(const char *fn)
 	}
 	if (p_name - l2b->cat_name != len_name || p_comm - l2b->cat_comm != len_comm) goto load_failure;
 	if (fp != stdin) fclose(fp);
+	l2b_build_bkt(l2b);
 	return l2b;
 load_failure:
 	if (fp != stdin) fclose(fp);
@@ -380,6 +496,7 @@ l2b_t *l2b_load_mmap(const char *fn, int preload)
 		p_comm += *p_comm? strlen(p_comm) + 1 : 1;
 	}
 	if (p_name - l2b->cat_name != len_name || p_comm - l2b->cat_comm != len_comm) goto mmap_failure;
+	l2b_build_bkt(l2b);
 	return l2b;
 mmap_failure:
 	l2b_destroy(l2b);

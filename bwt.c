@@ -35,6 +35,7 @@ void mb_bwt_destroy(mb_bwt_t *bwt)
 {
 	if (bwt == 0) return;
 	free(bwt->pre); // pre is always heap-allocated (by mb_bwt_cache)
+	free(bwt->pre2); // and pre2 by mb_bwt_cache2
 	if (bwt->mmap) kom_munmap(bwt->mmap, bwt->mmap_len); // data/sa point into the mapped file
 	else { free(bwt->sa); free(bwt->data); }
 	free(bwt);
@@ -118,7 +119,9 @@ mb_bwt_t *mb_bwt_init_from_raw(int is_byte, const void *raw_, uint64_t len, uint
 // not exactly the BWT string and therefore this macro is called bwt_B0 instead of bwt_B
 #define bwt_B0(b, k) ((b)->data[((k)>>7<<3) + 4 + (((k)&127)>>5)] >> (((k)&31)<<1) & 3)
 
-static inline void mb_bwt_block_prefetch(const mb_bwt_t *bwt, uint64_t k)
+/* always_inline: gcc -O3 marks a helper whose only effect is a prefetch as
+ * pure and deletes every call to it before inlining, prefetch included */
+static inline __attribute__((always_inline)) void mb_bwt_block_prefetch(const mb_bwt_t *bwt, uint64_t k)
 {
 	if (k > 0) __builtin_prefetch(bwt_block(bwt, k - 1 - (k - 1 >= bwt->primary)));
 }
@@ -157,15 +160,35 @@ uint64_t mb_bwt_rank11(const mb_bwt_t *bwt, uint64_t k, uint8_t c)
 	return n;
 }
 
-static inline const uint32_t *seek_block(const mb_bwt_t *bwt, uint64_t k, uint64_t cnt[4])
+#define BWT_EVEN 0x5555555555555555ULL
+
+/* Counts of A/C/G/T in the $-removed BWT string up to and including position k:
+ * the block's cumulative counts, plus the 8-bit counts of the block's first 64nt
+ * when k is in the second half, plus the counts over the 1-64nt of k's half up
+ * to k. The latter come from masked popcounts over the half's two u64 words
+ * (little endian; position i in bits 2i and 2i+1): the word holding k is shifted
+ * left so that positions after k drop out and zeros (A) enter at the bottom, so
+ * C, G and T need no mask and A is the rest of the k&0x3f+1 positions. Both words
+ * are folded into one u64 per popcount: word 0 on the even bits, word 1 on the odd. */
+static inline void rank_half(const mb_bwt_t *bwt, uint64_t k, uint64_t cnt[4])
 {
-	const uint64_t *p = bwt_block(bwt, k);
+	const uint64_t *p = bwt_block(bwt, k), *q = p + 4 + (k>>5&2); // q: the 64nt half holding k
 	uint64_t mask = (k&0x7f) >= 64? (1ULL << (64 - BWT_CNT_SHIFT)) - 1 : 0;
-	cnt[0] = (p[0] & BWT_CNT_MASK) + ((p[0] >> BWT_CNT_SHIFT) & mask);
-	cnt[1] = (p[1] & BWT_CNT_MASK) + ((p[1] >> BWT_CNT_SHIFT) & mask);
-	cnt[2] = (p[2] & BWT_CNT_MASK) + ((p[2] >> BWT_CNT_SHIFT) & mask);
-	cnt[3] = (p[3] & BWT_CNT_MASK) + ((p[3] >> BWT_CNT_SHIFT) & mask);
-	return (const uint32_t*)(p + 4);
+	uint64_t w = -(k>>5&1); // all ones when k is in the half's second word; no branch
+	uint64_t y0, y1, ct, gt, t;
+	uint32_t sh = (~k&0x1f) << 1, n1, n2, n3;
+	y0 = (q[0] & w) | (q[0] << sh & ~w);
+	y1 = q[1] << sh & w;
+	ct = (y0 & BWT_EVEN) | (y1 & BWT_EVEN) << 1; // C or T: low bit set
+	gt = (y0 >> 1 & BWT_EVEN) | (y1 & ~BWT_EVEN); // G or T: high bit set
+	t = (y0 & y0 >> 1 & BWT_EVEN) | (y1 & y1 >> 1 & BWT_EVEN) << 1; // T: both bits set
+	n3 = __builtin_popcountll(t);
+	n1 = __builtin_popcountll(ct) - n3;
+	n2 = __builtin_popcountll(gt) - n3;
+	cnt[0] = (p[0] & BWT_CNT_MASK) + ((p[0] >> BWT_CNT_SHIFT) & mask) + ((k&0x3f) + 1 - n1 - n2 - n3);
+	cnt[1] = (p[1] & BWT_CNT_MASK) + ((p[1] >> BWT_CNT_SHIFT) & mask) + n1;
+	cnt[2] = (p[2] & BWT_CNT_MASK) + ((p[2] >> BWT_CNT_SHIFT) & mask) + n2;
+	cnt[3] = (p[3] & BWT_CNT_MASK) + ((p[3] >> BWT_CNT_SHIFT) & mask) + n3;
 }
 
 static inline uint32_t rank_aux4(const mb_bwt_t *bwt, uint32_t x)
@@ -173,23 +196,42 @@ static inline uint32_t rank_aux4(const mb_bwt_t *bwt, uint32_t x)
 	return bwt->cnt_table[x&0xff] + bwt->cnt_table[x>>8&0xff] + bwt->cnt_table[x>>16&0xff] + bwt->cnt_table[x>>24];
 }
 
+/* cntl of mb_bwt_rank2a() when k and l are in one block, counted from k1:
+ * the block's counts at k1, plus l's symbols counted word by word from the
+ * start of k1's 64-row half. It gives rank_half(l1) whenever k1 <= l1 < seq_len,
+ * so it is only called otherwise: on l < k, an interval of negative size, it
+ * reads l1's offset in k1's word when l1's word comes before k1's (the loops
+ * run zero times), and past the text (rows the BWT does not hold) it counts the
+ * first half's words where rank_half() reads the block's stored counts. Such
+ * intervals arise from the forward extension on a single-strand index (genbwt
+ * -1), whose x[1] is not the reverse complement's interval, and the seeds of
+ * such an index depend on how this function counts them. */
+static __attribute__((noinline, cold)) void rank_l_from_k_half(const mb_bwt_t *bwt, uint64_t k1, uint64_t l1, uint64_t cntl[4])
+{
+	const uint64_t *p = bwt_block(bwt, k1);
+	uint64_t mask = (k1&0x7f) >= 64? (1ULL << (64 - BWT_CNT_SHIFT)) - 1 : 0;
+	const uint32_t *q = (const uint32_t*)(p + 4), *endk = q + ((k1&0x7f) >> 4), *endl = q + ((l1&0x7f) >> 4);
+	uint32_t y = 0, tmp;
+	q += (k1&0x7f) >= 64? 4 : 0;
+	for (; q < endk; ++q) y += rank_aux4(bwt, *q); // NB: this assumes little endian
+	for (; q < endl; ++q) y += rank_aux4(bwt, *q);
+	tmp = *q << ((~l1&0xf) << 1);
+	y += rank_aux4(bwt, tmp) - (~l1&0xf);
+	cntl[0] = (p[0] & BWT_CNT_MASK) + ((p[0] >> BWT_CNT_SHIFT) & mask) + (y&0xff);
+	cntl[1] = (p[1] & BWT_CNT_MASK) + ((p[1] >> BWT_CNT_SHIFT) & mask) + (y>>8&0xff);
+	cntl[2] = (p[2] & BWT_CNT_MASK) + ((p[2] >> BWT_CNT_SHIFT) & mask) + (y>>16&0xff);
+	cntl[3] = (p[3] & BWT_CNT_MASK) + ((p[3] >> BWT_CNT_SHIFT) & mask) + (y>>24);
+}
+
 void mb_bwt_rank1a(const mb_bwt_t *bwt, uint64_t k, uint64_t cnt[4])
 {
-	const uint32_t *q, *end;
-	uint32_t x, tmp;
 	if (k == 0) {
 		memset(cnt, 0, 4 * sizeof(uint64_t));
 		return;
 	}
 	--k;
 	k -= (k >= bwt->primary); // because $ is not in bwt
-	q = seek_block(bwt, k, cnt);
-	end = q + ((k&0x7f) >> 4);
-	q += (k&0x7f) >= 64? 4 : 0;
-	for (x = 0; q < end; ++q) x += rank_aux4(bwt, *q); // NB: this assumes little endian
-	tmp = *q << ((~k&0xf) << 1);
-	x += rank_aux4(bwt, tmp) - (~k&0xf);
-	cnt[0] += x&0xff, cnt[1] += x>>8&0xff, cnt[2] += x>>16&0xff, cnt[3] += x>>24;
+	rank_half(bwt, k, cnt);
 }
 
 void mb_bwt_rank2a(const mb_bwt_t *bwt, uint64_t k, uint64_t l, uint64_t cntk[4], uint64_t cntl[4])
@@ -207,26 +249,10 @@ void mb_bwt_rank2a(const mb_bwt_t *bwt, uint64_t k, uint64_t l, uint64_t cntk[4]
 		mb_bwt_rank1a(bwt, k, cntk);
 		memcpy(cntl, cntk, 4 * sizeof(uint64_t));
 		++cntl[bwt_B0(bwt, z)];
-	} else {
-		const uint32_t *q, *endk, *endl;
-		uint32_t x, y, tmp;
-		k = k1, l = l1;
-		q = seek_block(bwt, k, cntk);
-		// prepare cntk[]
-		endk = q + ((k&0x7f) >> 4);
-		endl = q + ((l&0x7f) >> 4);
-		q += (k&0x7f) >= 64? 4 : 0;
-		for (x = 0; q < endk; ++q) x += rank_aux4(bwt, *q);
-		y = x;
-		tmp = *q << ((~k&0xf) << 1);
-		x += rank_aux4(bwt, tmp) - (~k&0xf);
-		// calculate cntl[] and finalize cntk[]
-		for (; q < endl; ++q) y += rank_aux4(bwt, *q);
-		tmp = *q << ((~l&0xf) << 1);
-		y += rank_aux4(bwt, tmp) - (~l&0xf);
-		memcpy(cntl, cntk, 4 * sizeof(uint64_t));
-		cntk[0] += x&0xff; cntk[1] += x>>8&0xff; cntk[2] += x>>16&0xff; cntk[3] += x>>24;
-		cntl[0] += y&0xff; cntl[1] += y>>8&0xff; cntl[2] += y>>16&0xff; cntl[3] += y>>24;
+	} else { // k and l in the same block
+		rank_half(bwt, k1, cntk);
+		if (l1 < k1 || l1 >= bwt->seq_len) rank_l_from_k_half(bwt, k1, l1, cntl);
+		else rank_half(bwt, l1, cntl);
 	}
 }
 
@@ -255,7 +281,16 @@ static int64_t mb_bwt_back(const mb_bwt_t *f, const uint8_t *q, int64_t st, int6
 	int64_t i = pos - 1;
 	mb_sai_t ok[4];
 	assert(q[pos] < 4); // the backward pass never involves N
-	if (f->pre && pos - st >= f->pre_len) { // then use precomputed k-mer index instead of base-by-base extension
+	if (f->pre2 && pos - st >= f->pre2_len) { // the longer k-mer; if it jumps too far, the pre_len-mer ending at pos
+		uint64_t z = 0, l = 0;
+		for (i = pos; l < f->pre2_len; --i, ++l)
+			z = z << 2 | q[i];
+		*p = f->pre2[z];
+		if (p->size < min_occ) {
+			i += f->pre2_len - f->pre_len;
+			*p = f->pre[z >> 2 * (f->pre2_len - f->pre_len)];
+		}
+	} else if (f->pre && pos - st >= f->pre_len) { // then use precomputed k-mer index instead of base-by-base extension
 		uint64_t z = 0, l = 0;
 		for (i = pos; l < f->pre_len; --i, ++l) // get the k-mer
 			z = z << 2 | q[i];                  // NB: this loop doesn't check N
@@ -308,6 +343,14 @@ int64_t mb_bwt_smem(const mb_bwt_t *f, uint32_t len, const uint8_t *q, int64_t x
  * Batch SMEM *
  **************/
 
+static inline uint64_t bwt_invPsi(const mb_bwt_t *bwt, uint64_t k) // compute inverse CSA
+{
+	uint64_t x = k - (k > bwt->primary);
+	int c = bwt_B0(bwt, x);
+	x = bwt->L2[c] + 1 + mb_bwt_rank11(bwt, k, c); // +1 to account for the sentinel
+	return k == bwt->primary? 0 : x;
+}
+
 typedef struct { // a simplified version of kdq
 	int32_t front, count, cap;
 	int32_t *a;
@@ -336,139 +379,335 @@ static inline int32_t tq_shift(tiny_queue_t *q)
 	return x;
 }
 
-static inline void se_one_step_back(const mb_bwt_t *bwt, mb_smem_entry_t *s)
+/* rank_half() for se_extend1(), with the four counts in scalars. A private
+ * always_inline copy: another caller of the shared rank code changes how gcc
+ * inlines it into its other callers */
+static inline __attribute__((always_inline)) void se_rank_half(const mb_bwt_t *bwt, uint64_t k, uint64_t *c0, uint64_t *c1, uint64_t *c2, uint64_t *c3)
 {
-	mb_sai_t ok[4];
+	const uint64_t *p = bwt_block(bwt, k), *q = p + 4 + (k>>5&2);
+	uint64_t mask = (k&0x7f) >= 64? (1ULL << (64 - BWT_CNT_SHIFT)) - 1 : 0;
+	uint64_t w = -(k>>5&1);
+	uint64_t y0, y1, ct, gt, t;
+	uint32_t sh = (~k&0x1f) << 1, n1, n2, n3;
+	y0 = (q[0] & w) | (q[0] << sh & ~w);
+	y1 = q[1] << sh & w;
+	ct = (y0 & BWT_EVEN) | (y1 & BWT_EVEN) << 1;
+	gt = (y0 >> 1 & BWT_EVEN) | (y1 & ~BWT_EVEN);
+	t = (y0 & y0 >> 1 & BWT_EVEN) | (y1 & y1 >> 1 & BWT_EVEN) << 1;
+	n3 = __builtin_popcountll(t);
+	n1 = __builtin_popcountll(ct) - n3;
+	n2 = __builtin_popcountll(gt) - n3;
+	*c0 = (p[0] & BWT_CNT_MASK) + ((p[0] >> BWT_CNT_SHIFT) & mask) + ((k&0x3f) + 1 - n1 - n2 - n3);
+	*c1 = (p[1] & BWT_CNT_MASK) + ((p[1] >> BWT_CNT_SHIFT) & mask) + n1;
+	*c2 = (p[2] & BWT_CNT_MASK) + ((p[2] >> BWT_CNT_SHIFT) & mask) + n2;
+	*c3 = (p[3] & BWT_CNT_MASK) + ((p[3] >> BWT_CNT_SHIFT) & mask) + n3;
+}
+
+/* rank_half(bwt, k, cnt) reduced to cnt[c] (*n) and the sum of cnt[] above c
+ * (*u), selected by masks: c is the next base, so a branch on it mispredicts */
+static inline __attribute__((always_inline)) void se_rank_c(const mb_bwt_t *bwt, uint64_t k, int32_t c, uint64_t *n, uint64_t *u)
+{
+	uint64_t c0, c1, c2, c3;
+	uint64_t e0 = -(uint64_t)(c == 0), e1 = -(uint64_t)(c == 1), e2 = -(uint64_t)(c == 2), e3 = -(uint64_t)(c == 3);
+	se_rank_half(bwt, k, &c0, &c1, &c2, &c3);
+	*n = (c0 & e0) | (c1 & e1) | (c2 & e2) | (c3 & e3);
+	*u = (c3 & ~e3) + (c2 & (e0 | e1)) + (c1 & e0);
+}
+
+/* The queue's extension of p by the symbol c: mb_bwt_extend(bwt, p, ok, is_back)
+ * followed by `if (ok[c].size >= min_occ) *p = ok[c]`, forming ok[c] only, with
+ * mb_bwt_rank2a()'s counts in registers, so that no load reads back a store of
+ * another width. ok[c].size is cl - ck and the sizes above c sum to ul - uk,
+ * both modulo 2^64 as in mb_bwt_extend(). Returns whether p was extended;
+ * p->info is left as it is (mb_bwt_extend() never writes ok[].info, and the
+ * queue sets p->info before reading it) */
+static inline __attribute__((always_inline)) int se_extend1(const mb_bwt_t *bwt, mb_sai_t *p, int32_t c, int is_back, int32_t min_occ)
+{
+	uint64_t k = p->x[!is_back], l = k + p->size, k1 = k - 1, l1 = l - 1;
+	uint64_t ck, uk, cl, ul, sz;
+	int same; // as mb_bwt_rank2a(): k and l in one block, neither 0
+	k1 -= (k1 >= bwt->primary);
+	l1 -= (l1 >= bwt->primary);
+	same = !(k1>>7 != l1>>7 || k == 0 || l == 0);
+	mb_bwt_block_prefetch(bwt, k);
+	if (!same) mb_bwt_block_prefetch(bwt, l);
+	if (k == 0) ck = uk = 0;
+	else se_rank_c(bwt, k1, c, &ck, &uk);
+	if (same && l - k == 1) { // the counts at k plus the symbol at row k
+		int32_t b = bwt_B0(bwt, k - (k > bwt->primary));
+		cl = ck + (b == c), ul = uk + (b > c);
+	} else if (l == 0) cl = ul = 0;
+	else if (same && (l1 < k1 || l1 >= bwt->seq_len)) { // as mb_bwt_rank2a(); never on an interval within the text
+		uint64_t t[4];
+		int32_t i;
+		rank_l_from_k_half(bwt, k1, l1, t);
+		cl = t[c];
+		for (i = c + 1, ul = 0; i < 4; ++i) ul += t[i];
+	} else se_rank_c(bwt, l1, c, &cl, &ul);
+	sz = cl - ck;
+	if (sz < min_occ) return 0;
+	p->x[!is_back] = bwt->L2[c] + 1 + ck; // +1 for the missing sentinel
+	p->x[is_back] += (k <= bwt->primary && l > bwt->primary) + (ul - uk); // plus the sizes of the symbols above c
+	p->size = sz;
+	return 1;
+}
+
+static inline __attribute__((always_inline)) void se_one_step_back(const mb_bwt_t *bwt, mb_smem_entry_t *s)
+{
 	int32_t c = s->q[s->i];
 	assert(c < 4); // shouldn't happen
-	mb_bwt_extend(bwt, &s->p, ok, 1);
-	if (ok[c].size < s->min_occ) { // move back to stage1
+	if (!se_extend1(bwt, &s->p, c, 1, s->min_occ)) { // move back to stage1
 		s->x = s->i + 1;
 		s->stage = 1;
 	} else { // stay in the two backward stages
-		s->p = ok[c];
 		s->i--;
 		mb_bwt_block_prefetch(bwt, s->p.x[0]); // prefetch for the next backward iteration
 		mb_bwt_block_prefetch(bwt, s->p.x[0] + s->p.size);
 	}
 }
 
-void mb_bwt_smem_batch(void *km, const mb_bwt_t *bwt, int32_t n, mb_smem_entry_t *a)
+/* T[t] of the BWT text, the 2-bit forward strand in pac followed by its
+ * reverse complement (seq_len = 2*tot_len), compared with q[i..en) from
+ * T[t]; returns the first i at which they differ (q[i] is N or T has ended)
+ * or en */
+static inline int32_t se_text_match(const uint64_t *pac, uint64_t seq_len, const uint8_t *q, int32_t i, int32_t en, uint64_t t)
+{
+	uint64_t half = seq_len >> 1;
+	for (; i < en && t < half; ++i, ++t)
+		if (q[i] != (pac[t>>5] >> ((t&31)<<1) & 3)) return i;
+	for (; i < en && t < seq_len; ++i, ++t) {
+		uint64_t u = seq_len - 1 - t;
+		if (q[i] != 3 - (pac[u>>5] >> ((u&31)<<1) & 3)) return i;
+	}
+	return i;
+}
+
+static inline void se_text_prefetch(const uint64_t *pac, uint64_t seq_len, uint64_t t)
+{
+	uint64_t half = seq_len >> 1;
+	if (t < half) __builtin_prefetch(&pac[t>>5]);
+	else if (t < seq_len) __builtin_prefetch(&pac[(seq_len - 1 - t)>>5]);
+}
+
+/* Enter or stay in the forward pass at s->i with s->p. With the text in pac,
+ * an interval of size 1 extends by a base iff its one occurrence is followed
+ * by that base, so it goes to the SA walk (stages 7 and 8, ->p.x[1] holding
+ * the row and ->p.info the steps) and then reads the text (stage 9). */
+static inline void se_forward(const mb_bwt_t *bwt, const uint64_t *pac, mb_smem_entry_t *s)
+{
+	if (pac && s->p.size == 1 && s->min_occ == 1 && s->i < s->en && s->q[s->i] < 4) {
+		uint64_t k = s->p.x[0];
+		s->p.x[1] = k, s->p.info = 0;
+		if ((k & ((1ULL<<bwt->sa_bit) - 1)) == 0) {
+			__builtin_prefetch(&bwt->sa[k >> bwt->sa_bit]);
+			s->stage = 8;
+		} else {
+			mb_bwt_block_prefetch(bwt, k);
+			s->stage = 7;
+		}
+	} else {
+		mb_bwt_block_prefetch(bwt, s->p.x[1]); // prefetch for the forward pass
+		mb_bwt_block_prefetch(bwt, s->p.x[1] + s->p.size);
+		s->stage = 4;
+	}
+}
+
+#define MB_KMER2 0x80000000U // in mb_smem_entry_t::kmer: a key of bwt->pre2, not of bwt->pre
+
+/* Reads the k-mer of s->q ending at s->i into s->kmer and prefetches its table
+ * entry: the pre2_len-mer (flagged MB_KMER2) when it fits in the n bases
+ * available, else the pre_len-mer, which the caller checked fits; s->i ends
+ * before the k-mer. The backward pass never meets N here. */
+static inline void se_kmer_get(const mb_bwt_t *bwt, mb_smem_entry_t *s, int32_t n)
 {
 	int32_t i;
+	if (bwt->pre2 && n >= bwt->pre2_len) {
+		for (i = 0, s->kmer = 0; i < bwt->pre2_len; ++i, s->i--)
+			s->kmer = s->kmer << 2 | s->q[s->i];
+		__builtin_prefetch(&bwt->pre2[s->kmer]);
+		s->kmer |= MB_KMER2;
+	} else {
+		for (i = 0, s->kmer = 0; i < bwt->pre_len; ++i, s->i--)
+			s->kmer = s->kmer << 2 | s->q[s->i];
+		__builtin_prefetch(&bwt->pre[s->kmer]);
+	}
+}
+
+// the forward pass can't extend s->p at s->i < s->en: save the SMEM and start the second backward pass
+static inline void se_forward_end(void *km, const mb_bwt_t *bwt, mb_smem_entry_t *s)
+{
+	s->p.info = (uint64_t)s->x << 32 | s->i;
+	Kgrow(km, mb_sai_t, s->v->a, s->v->n, s->v->m);
+	s->v->a[s->v->n++] = s->p; // save the interval
+	if (s->q[s->i] > 3) { // if N, skip it and move back to stage 1
+		s->x = s->i + 1;
+		s->stage = 1;
+	} else if (bwt->pre && s->i - s->x - 1 >= bwt->pre_len) { // get k-mer
+		se_kmer_get(bwt, s, s->i - s->x - 1);
+		s->stage = 5;
+	} else { // skip stage 5
+		mb_bwt_set_intv(bwt, s->q[s->i--], &s->p);
+		s->stage = 6;
+	}
+}
+
+static inline void smem_entry_init(void *km, mb_smem_entry_t *s)
+{
+	s->stage = 1;
+	s->x = s->st;
+	if (s->v->m < 64) { // preallocate to avoid frequent krealloc(), which can be slow
+		s->v->m = 64;
+		s->v->a = Krealloc(km, mb_sai_t, s->v->a, s->v->m);
+	}
+}
+
+/* One step of the entry s of mb_bwt_smem_feed(); returns 0 when s has finished.
+ * always_inline: the step is the batch SMEM's inner loop */
+static inline __attribute__((always_inline)) int smem_step(void *km, const mb_bwt_t *bwt, const uint64_t *pac, mb_smem_entry_t *s)
+{
+	if (s->stage == 1) { // set interval for the first backward pass in smem; require ->x
+		int32_t i, xn;
+		if (s->en - s->x < s->min_len)
+			return 0; // the entry has finished
+		for (i = s->x, xn = -1; i < s->x + s->min_len; ++i) // find the position of the last N
+			if (s->q[i] > 3) xn = i;
+		if (xn >= 0) { // skip N and stay in stage 1
+			s->x = xn + 1;
+		} else {
+			s->i = s->x + s->min_len - 1;
+			if (bwt->pre && s->min_len >= bwt->pre_len) { // get k-mer for prefetch
+				se_kmer_get(bwt, s, s->min_len); // backward pass shouldn't meet N
+				s->stage = 2;
+			} else { // skip stage 2
+				mb_bwt_set_intv(bwt, s->q[s->i--], &s->p);
+				s->stage = 3;
+			}
+		}
+	} else if (s->stage == 2 || s->stage == 5) { // k-mer lookup
+		if (s->kmer & MB_KMER2) { // the longer k-mer; if it jumps too far, the pre_len-mer ending at the same base
+			uint32_t z = s->kmer & ~MB_KMER2;
+			s->p = bwt->pre2[z];
+			if (s->p.size < s->min_occ) {
+				s->i += bwt->pre2_len - bwt->pre_len;
+				s->p = bwt->pre[z >> 2 * (bwt->pre2_len - bwt->pre_len)];
+			}
+		} else s->p = bwt->pre[s->kmer];
+		if (s->p.size < s->min_occ) { // jumped too far with the k-mer cache; revert
+			s->i += bwt->pre_len;
+			mb_bwt_set_intv(bwt, s->q[s->i--], &s->p);
+		}
+		mb_bwt_block_prefetch(bwt, s->p.x[0]);
+		mb_bwt_block_prefetch(bwt, s->p.x[0] + s->p.size);
+		s->stage++;
+	} else if (s->stage == 3 || s->stage == 6) { // first (3) or second (6) backward pass; require ->{i,p}
+		if (s->i >= s->x + (s->stage == 6)) se_one_step_back(bwt, s);
+		else if (s->stage == 3) { // move to the next stage
+			s->i = s->x + s->min_len;
+			se_forward(bwt, pac, s);
+		} else {
+			s->x = s->i + 1;
+			s->stage = 1;
+		}
+	} else if (s->stage == 4) { // forward pass; require ->{i,p}
+		if (s->i == s->en) {
+			s->p.info = (uint64_t)s->x << 32 | s->i;
+			Kgrow(km, mb_sai_t, s->v->a, s->v->n, s->v->m);
+			s->v->a[s->v->n++] = s->p; // save the interval
+			return 0; // the entry has finished
+		} else {
+			int32_t c = 3 - (int32_t)s->q[s->i];
+			if (c >= 0 && se_extend1(bwt, &s->p, c, 0, s->min_occ)) { // stay in stage 4
+				s->i++;
+				se_forward(bwt, pac, s);
+			} else se_forward_end(km, bwt, s);
+		}
+	} else if (s->stage == 7) { // SA walk of the size-1 interval's row, one step per turn
+		uint64_t k = bwt_invPsi(bwt, s->p.x[1]);
+		s->p.x[1] = k, ++s->p.info;
+		if ((k & ((1ULL<<bwt->sa_bit) - 1)) == 0) {
+			__builtin_prefetch(&bwt->sa[k >> bwt->sa_bit]);
+			s->stage = 8;
+		} else mb_bwt_block_prefetch(bwt, k);
+	} else if (s->stage == 8) { // sampled SA value: the text position of x[0], as mb_bwt_sa_batch() gets it
+		uint64_t pos = s->p.info + bwt->sa[s->p.x[1] >> bwt->sa_bit];
+		s->p.x[1] = pos | MB_SA_KNOWN;
+		se_text_prefetch(pac, bwt->seq_len, pos + (s->i - s->x));
+		s->stage = 9;
+	} else if (s->stage == 9) { // forward pass on the text
+		uint64_t pos = s->p.x[1] & ~MB_SA_KNOWN;
+		s->i = se_text_match(pac, bwt->seq_len, s->q, s->i, s->en, pos + (s->i - s->x));
+		if (s->i == s->en) {
+			s->p.info = (uint64_t)s->x << 32 | s->i;
+			Kgrow(km, mb_sai_t, s->v->a, s->v->n, s->v->m);
+			s->v->a[s->v->n++] = s->p; // save the interval
+			return 0; // the entry has finished
+		}
+		se_forward_end(km, bwt, s);
+	}
+	return 1;
+}
+
+/* The batch SMEM queue over the n slots of a[]. Without feed, a[] holds n
+ * entries and the call returns when all have finished. With feed, a slot is
+ * filled by feed(data, slot, 0) at the start, and when its entry finishes by
+ * feed(data, slot, 1), so that the queue stays full while jobs are pending;
+ * with pac, as mb_bwt_smem_batch_pac(). */
+void mb_bwt_smem_feed(void *km, const mb_bwt_t *bwt, const uint64_t *pac, int32_t n, mb_smem_entry_t *a, mb_smem_feed_f feed, void *data)
+{
+	int32_t i, n_free = 0, *free_slot = 0;
 	tiny_queue_t tq;
 
 	// initialize
 	tq_init(km, &tq, n);
+	if (feed) free_slot = Kmalloc(km, int32_t, n);
 	for (i = 0; i < n; ++i) {
-		mb_smem_entry_t *s = &a[i];
-		tq_push(&tq, i);
-		s->stage = 1;
-		s->x = s->st;
-		if (s->v->m < 64) { // preallocate to avoid frequent krealloc(), which can be slow
-			s->v->m = 64;
-			s->v->a = Krealloc(km, mb_sai_t, s->v->a, s->v->m);
+		if (feed && !feed(data, &a[i], 0)) {
+			free_slot[n_free++] = i;
+			continue;
 		}
+		tq_push(&tq, i);
+		smem_entry_init(km, &a[i]);
 	}
 
 	// core loop
 	while (tq.count > 0) {
-		int32_t idx;
-		mb_smem_entry_t *s;
-
-		idx = tq_shift(&tq);
-		s = &a[idx];
-		if (s->stage == 1) { // set interval for the first backward pass in smem; require ->x
-			int32_t i, xn;
-			if (s->en - s->x < s->min_len)
-				continue; // IMPORTANT: this skips the tq_push() at the end of this long while loop
-			for (i = s->x, xn = -1; i < s->x + s->min_len; ++i) // find the position of the last N
-				if (s->q[i] > 3) xn = i;
-			if (xn >= 0) { // skip N and stay in stage 1
-				s->x = xn + 1;
-			} else {
-				s->i = s->x + s->min_len - 1;
-				if (bwt->pre && s->min_len >= bwt->pre_len) { // get k-mer for prefetch
-					for (i = 0, s->kmer = 0; i < bwt->pre_len; ++i, s->i--)
-						s->kmer = s->kmer << 2 | s->q[s->i]; // backward pass shouldn't meet N
-					__builtin_prefetch(&bwt->pre[s->kmer]);
-					s->stage = 2;
-				} else { // skip stage 2
-					mb_bwt_set_intv(bwt, s->q[s->i--], &s->p);
-					s->stage = 3;
+		int32_t idx = tq_shift(&tq);
+		if (smem_step(km, bwt, pac, &a[idx])) {
+			tq_push(&tq, idx);
+		} else if (feed) { // the entry has finished: refill its slot, and idle slots if feed() has more
+			if (feed(data, &a[idx], 1)) {
+				tq_push(&tq, idx);
+				smem_entry_init(km, &a[idx]);
+				while (n_free > 0 && feed(data, &a[free_slot[n_free - 1]], 0)) {
+					idx = free_slot[--n_free];
+					tq_push(&tq, idx);
+					smem_entry_init(km, &a[idx]);
 				}
-			}
-		} else if (s->stage == 2 || s->stage == 5) { // k-mer lookup
-			s->p = bwt->pre[s->kmer];
-			if (s->p.size < s->min_occ) { // jumped too far with the k-mer cache; revert
-				s->i += bwt->pre_len;
-				mb_bwt_set_intv(bwt, s->q[s->i--], &s->p);
-			}
-			mb_bwt_block_prefetch(bwt, s->p.x[0]);
-			mb_bwt_block_prefetch(bwt, s->p.x[0] + s->p.size);
-			s->stage++;
-		} else if (s->stage == 3) { // first backward pass; require ->{i,p}
-			if (s->i < s->x) { // move to the next stage
-				mb_bwt_block_prefetch(bwt, s->p.x[1]); // prefetch for the forward pass
-				mb_bwt_block_prefetch(bwt, s->p.x[1] + s->p.size);
-				s->i = s->x + s->min_len;
-				s->stage = 4;
-			} else se_one_step_back(bwt, s);
-		} else if (s->stage == 4) { // forward pass; require ->{i,p}
-			if (s->i == s->en) {
-				s->p.info = (uint64_t)s->x << 32 | s->i;
-				Kgrow(km, mb_sai_t, s->v->a, s->v->n, s->v->m);
-				s->v->a[s->v->n++] = s->p; // save the interval
-				continue; // trigger termination as tq_push() at the end of the loop is skipped
-			} else {
-				int32_t i, c = 3 - (int32_t)s->q[s->i];
-				mb_sai_t ok[4];
-				if (c >= 0) mb_bwt_extend(bwt, &s->p, ok, 0);
-				if (c >= 0 && ok[c].size >= s->min_occ) { // stay in stage 4
-					s->p = ok[c];
-					s->i++;
-					mb_bwt_block_prefetch(bwt, s->p.x[1]);
-					mb_bwt_block_prefetch(bwt, s->p.x[1] + s->p.size);
-				} else {
-					s->p.info = (uint64_t)s->x << 32 | s->i;
-					Kgrow(km, mb_sai_t, s->v->a, s->v->n, s->v->m);
-					s->v->a[s->v->n++] = s->p; // save the interval
-					if (c < 0) { // if N, skip it and move back to stage 1
-						s->x = s->i + 1;
-						s->stage = 1;
-					} else if (bwt->pre && s->i - s->x - 1 >= bwt->pre_len) { // get k-mer
-						for (i = 0, s->kmer = 0; i < bwt->pre_len; ++i, s->i--)
-							s->kmer = s->kmer << 2 | s->q[s->i];
-						__builtin_prefetch(&bwt->pre[s->kmer]);
-						s->stage = 5;
-					} else { // skip stage 5
-						mb_bwt_set_intv(bwt, s->q[s->i--], &s->p);
-						s->stage = 6;
-					}
-				}
-			}
-		} else if (s->stage == 6) { // second backward pass
-			if (s->i < s->x + 1) {
-				s->x = s->i + 1;
-				s->stage = 1;
-			} else se_one_step_back(bwt, s);
+			} else free_slot[n_free++] = idx;
 		}
-		tq_push(&tq, idx);
 	}
+	kfree(km, free_slot);
 	kfree(km, tq.a);
+}
+
+void mb_bwt_smem_batch(void *km, const mb_bwt_t *bwt, int32_t n, mb_smem_entry_t *a)
+{
+	mb_bwt_smem_feed(km, bwt, 0, n, a, 0, 0);
+}
+
+/* With pac non-NULL, the 2-bit forward strand of the BWT text (as l2b_t::pac;
+ * bwt->seq_len must be twice its length), a size-1 interval in the forward
+ * pass with min_occ 1 is extended by reading the text at its occurrence, and
+ * its x[1] is saved as that occurrence's text position | MB_SA_KNOWN instead
+ * of the SA row of the reverse complement. x[0], size and info are unchanged. */
+void mb_bwt_smem_batch_pac(void *km, const mb_bwt_t *bwt, const uint64_t *pac, int32_t n, mb_smem_entry_t *a)
+{
+	mb_bwt_smem_feed(km, bwt, pac, n, a, 0, 0);
 }
 
 /***************************
  * Suffix array operations *
  ***************************/
-
-static inline uint64_t bwt_invPsi(const mb_bwt_t *bwt, uint64_t k) // compute inverse CSA
-{
-	uint64_t x = k - (k > bwt->primary);
-	int c = bwt_B0(bwt, x);
-	x = bwt->L2[c] + 1 + mb_bwt_rank11(bwt, k, c); // +1 to account for the sentinel
-	return k == bwt->primary? 0 : x;
-}
 
 // bwt->bwt and bwt->occ must be precalculated
 void mb_bwt_gen_sa(mb_bwt_t *bwt, uint32_t sa_bit)
@@ -507,16 +746,21 @@ uint64_t mb_bwt_sa(const mb_bwt_t *bwt, uint64_t k)
 void mb_bwt_sa_batch(void *km, const mb_bwt_t *bwt, int64_t n, uint64_t *x)
 {
 	uint64_t mask = (1ULL<<bwt->sa_bit) - 1;
-	int64_t i, step = 0, r = n;
+	int64_t i, step = 0, r;
 	kom128_t *z;
 	if (n <= 0) return;
 	z = Kmalloc(km, kom128_t, n);
-	for (i = 0; i < n; ++i) {
-		z[i].x = x[i], z[i].y = i;
-		if ((z[i].x & mask) == 0)
-			__builtin_prefetch(&bwt->sa[z[i].x >> bwt->sa_bit]);
+	for (i = 0, r = 0; i < n; ++i) {
+		if (x[i] & MB_SA_KNOWN) { // already a text position
+			x[i] &= ~MB_SA_KNOWN;
+			continue;
+		}
+		z[r].x = x[i], z[r].y = i;
+		if ((z[r].x & mask) == 0)
+			__builtin_prefetch(&bwt->sa[z[r].x >> bwt->sa_bit]);
 		else
-			mb_bwt_block_prefetch(bwt, z[i].x);
+			mb_bwt_block_prefetch(bwt, z[r].x);
+		++r;
 	}
 	for (step = 0; r > 0; ++step) {
 		int64_t r0 = r;
@@ -581,9 +825,87 @@ void mb_bwt_count_kmer(const mb_bwt_t *bwt, int32_t depth, mb_sai_t *s) // adapt
 void mb_bwt_cache(mb_bwt_t *bwt, int32_t len)
 {
 	if (bwt->pre) free(bwt->pre);
+	free(bwt->pre2); // derived from pre
+	bwt->pre2 = 0, bwt->pre2_len = 0;
 	bwt->pre_len = len;
 	bwt->pre = kom_calloc(mb_sai_t, 1 << len*2);
 	mb_bwt_count_kmer(bwt, len, bwt->pre);
+}
+
+/* The pre2_len-mer table, pre2_len = pre_len + d with d 1 or 2, built by d
+ * levels of backward extension from the pre_len-mer entries, exactly as the
+ * backward pass extends an interval it took from pre: an entry is the interval
+ * the pass reaches from the pre_len-mer, whatever its size, and its info is 0.
+ * Prepending base c to the pattern of key z gives key z<<2|c. A pfor item
+ * extends CACHE2_BLK pre_len-mers and then their children, each level
+ * prefetching the BWT blocks of the interval CACHE2_DIST ahead. The prefetch is
+ * a macro: gcc -O3 deletes calls to a helper whose only effect is a prefetch
+ * unless it is always_inline (mb_bwt_block_prefetch()). */
+#define CACHE2_BLK 256
+#define CACHE2_DIST 16
+
+#define cache2_prefetch(bwt, p) do { \
+		uint64_t k_ = (p)->x[0], l_ = k_ + (p)->size; \
+		if (k_ > 0) __builtin_prefetch(bwt_block(bwt, k_ - 1 - (k_ - 1 >= (bwt)->primary))); \
+		if (l_ > 0) __builtin_prefetch(bwt_block(bwt, l_ - 1 - (l_ - 1 >= (bwt)->primary))); \
+	} while (0)
+
+typedef struct {
+	const mb_bwt_t *bwt;
+	mb_sai_t *pre2;
+	int32_t d;
+} cache2_aux_t;
+
+static void cache2_worker(void *data, long j, int tid)
+{
+	const cache2_aux_t *a = (const cache2_aux_t*)data;
+	const mb_bwt_t *bwt = a->bwt;
+	const mb_sai_t *pre = bwt->pre;
+	uint64_t z0 = (uint64_t)j * CACHE2_BLK, n = 1ULL << 2 * bwt->pre_len, z1, z, r, nm;
+	mb_sai_t mid[CACHE2_BLK * 4], ok[4], *out;
+	int c;
+	(void)tid;
+	z1 = z0 + CACHE2_BLK < n? z0 + CACHE2_BLK : n;
+	out = a->d == 1? &a->pre2[z0 << 2] : mid;
+	for (z = z0; z < z1 && z < z0 + CACHE2_DIST; ++z)
+		cache2_prefetch(bwt, &pre[z]);
+	for (z = z0; z < z1; ++z) {
+		if (z + CACHE2_DIST < z1) cache2_prefetch(bwt, &pre[z + CACHE2_DIST]);
+		mb_bwt_extend(bwt, &pre[z], ok, 1);
+		for (c = 0; c < 4; ++c) {
+			mb_sai_t *o = &out[(z - z0) << 2 | c];
+			*o = ok[c], o->info = 0;
+		}
+	}
+	if (a->d == 1) return;
+	nm = (z1 - z0) << 2;
+	for (r = 0; r < nm && r < CACHE2_DIST; ++r)
+		cache2_prefetch(bwt, &mid[r]);
+	for (r = 0; r < nm; ++r) {
+		if (r + CACHE2_DIST < nm) cache2_prefetch(bwt, &mid[r + CACHE2_DIST]);
+		mb_bwt_extend(bwt, &mid[r], ok, 1);
+		for (c = 0; c < 4; ++c) {
+			mb_sai_t *o = &a->pre2[((z0 << 2) + r) << 2 | c];
+			*o = ok[c], o->info = 0;
+		}
+	}
+}
+
+void mb_bwt_cache2(mb_bwt_t *bwt, int32_t len, int n_threads, kom_pfor_f pfor)
+{
+	cache2_aux_t a;
+	long n_blk, j;
+	free(bwt->pre2);
+	bwt->pre2 = 0, bwt->pre2_len = 0;
+	if (bwt->pre == 0 || len <= (int32_t)bwt->pre_len || len > (int32_t)bwt->pre_len + 2 || len > 15)
+		return; // 15: mb_smem_entry_t::kmer keeps bit 31 for MB_KMER2
+	a.bwt = bwt, a.d = len - bwt->pre_len;
+	a.pre2 = kom_malloc(mb_sai_t, 1ULL << 2 * len);
+	if (a.pre2 == 0) return; // seeding is the same without it
+	n_blk = ((1L << 2 * bwt->pre_len) + CACHE2_BLK - 1) / CACHE2_BLK;
+	if (n_threads > 1 && pfor) pfor(n_threads, cache2_worker, &a, n_blk);
+	else for (j = 0; j < n_blk; ++j) cache2_worker(&a, j, 0);
+	bwt->pre2 = a.pre2, bwt->pre2_len = len;
 }
 
 /*************************
@@ -643,6 +965,11 @@ int mb_bwt_save(const char *fn, const mb_bwt_t *bwt)
 
 mb_bwt_t *mb_bwt_load(const char *fn)
 {
+	return mb_bwt_load_mt(fn, 1, 0);
+}
+
+mb_bwt_t *mb_bwt_load_mt(const char *fn, int n_threads, kom_pfor_f pfor)
+{
 	FILE *fp;
 	char magic[4];
 	uint64_t x[5];
@@ -663,7 +990,8 @@ mb_bwt_t *mb_bwt_load(const char *fn)
 	bwt->seq_len = bwt->L2[4];
 	bwt->data_len = mb_bwt_data_len(bwt->seq_len);
 	bwt->data = kom_calloc(uint64_t, bwt->data_len);
-	read_huge(fp, bwt->data_len << 3, bwt->data);
+	if (kom_fread_par(fp, bwt->data, bwt->data_len << 3, n_threads, pfor) < 0)
+		read_huge(fp, bwt->data_len << 3, bwt->data);
 	fread(&bwt->n_sa, 8, 1, fp);
 	if (bwt->sa_bit != (uint32_t)-1 && bwt->n_sa > 0) {
 		uint64_t expected_n_sa = (bwt->seq_len + (1ULL << bwt->sa_bit)) >> bwt->sa_bit;
@@ -672,7 +1000,8 @@ mb_bwt_t *mb_bwt_load(const char *fn)
 			return NULL;
 		}
 		bwt->sa = kom_malloc(uint64_t, bwt->n_sa);
-		fread(bwt->sa, 8, bwt->n_sa, fp);
+		if (kom_fread_par(fp, bwt->sa, bwt->n_sa << 3, n_threads, pfor) < 0)
+			fread(bwt->sa, 8, bwt->n_sa, fp);
 	}
 	fclose(fp);
 	return bwt;

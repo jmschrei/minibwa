@@ -211,42 +211,81 @@ static void mb_pair_hits(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_
 	kfree(km, pa);
 }
 
-static int32_t mb_ungap(void *km, int32_t qlen, const uint8_t *qseq, int32_t tlen, const uint8_t *tseq, int32_t kmer, l2b_meth_t mt, int32_t *max_i, int32_t *n_good, int32_t *n_kmer)
-{ // a linear algorithm to find ungapped alignment
+typedef struct { // query k-mer table of one mate, strand and methylation type; reused across the windows of one mb_matesw call
+	const uint8_t *qseq; // the sequence the table holds (0 when empty); with qlen, mt and kmer, the key
+	l2b_meth_t mt;
+	int32_t qlen, kmer, n_kmer; // n_kmer: number of distinct k-mers on the query; x[0..n_kmer-1] are the entries set in h
+	uint16_t *h, *x; // h[k-mer]: last position of the k-mer on the query, 0 if absent
+	uint16_t *nx; // nx[i]: the previous position of the k-mer ending at query position i, 0 if none
+} mb_qkmer_t;
+
+static void mb_qkmer_set(void *km, mb_qkmer_t *qk, int32_t qlen, const uint8_t *qseq, int32_t kmer, l2b_meth_t mt)
+{
 	static uint8_t c2t[4] = { 0, 3, 2, 3 };
 	static uint8_t g2a[4] = { 0, 1, 0, 3 };
-	int32_t i, l, cap = 1 << kmer*2, mask = cap - 1, max, *a;
+	int32_t i, l, j, mask = (1 << kmer*2) - 1;
 	uint16_t *h, x;
-	*max_i = -1, *n_good = *n_kmer = 0;
-	if (qlen >= UINT16_MAX) return 0;
-	a = Kcalloc(km, int32_t, tlen);
-	h = Kcalloc(km, uint16_t, cap);
+	if (qk->h && qk->qseq == qseq && qk->qlen == qlen && qk->mt == mt && qk->kmer == kmer) return; // already built
+	if (qk->h == 0 || qk->kmer != kmer) {
+		kfree(km, qk->h);
+		qk->h = Kcalloc(km, uint16_t, 1 << kmer*2);
+	} else {
+		for (j = 0; j < qk->n_kmer; ++j) // reset only the entries the previous query set
+			qk->h[qk->x[j]] = 0;
+	}
+	h = qk->h, qk->n_kmer = 0;
 	for (i = l = 0, x = 0; i < qlen; ++i) {
 		if (qseq[i] < 4) {
 			uint8_t c = mt == L2B_METH_C2T? c2t[qseq[i]] : mt == L2B_METH_G2A? g2a[qseq[i]] : qseq[i];
 			x = (x << 2 | c) & mask;
 			if (++l >= kmer) {
-				if (h[x] == 0) ++*n_kmer; // n_kmer is the number of distinct k-mers on the query sequence
+				if (h[x] == 0) qk->x[qk->n_kmer++] = x;
+				qk->nx[i] = h[x];
 				h[x] = i;
 			}
 		} else x = 0, l = 0;
 	}
+	qk->qseq = qseq, qk->qlen = qlen, qk->mt = mt, qk->kmer = kmer;
+}
+
+// With dc (tlen + qlen zeroed counters), mb_ungap() also counts the k-mer hits of every query occurrence on every diagonal,
+// target end i and query end p at dc[i - p + qlen], and sets *n_dc to their number, or to -1 if tseq has an ambiguous base.
+static int32_t mb_ungap(void *km, mb_qkmer_t *qk, int32_t qlen, const uint8_t *qseq, int32_t tlen, const uint8_t *tseq, int32_t kmer, l2b_meth_t mt, int32_t *max_i, int32_t *n_good, int32_t *n_kmer,
+	uint16_t *dc, int32_t *n_dc)
+{ // a linear algorithm to find ungapped alignment
+	static uint8_t c2t[4] = { 0, 3, 2, 3 };
+	static uint8_t g2a[4] = { 0, 1, 0, 3 };
+	int32_t i, l, mask = (1 << kmer*2) - 1, max, *a, n_hit = 0, amb = 0;
+	const uint16_t *h, *nx;
+	uint16_t x;
+	*max_i = -1, *n_good = *n_kmer = 0, *n_dc = -1;
+	if (qlen >= UINT16_MAX) return 0;
+	a = Kcalloc(km, int32_t, tlen);
+	mb_qkmer_set(km, qk, qlen, qseq, kmer, mt);
+	h = qk->h, nx = qk->nx, *n_kmer = qk->n_kmer;
 	for (i = l = 0, x = 0; i < tlen; ++i) {
 		if (tseq[i] < 4) {
 			uint8_t c = mt == L2B_METH_C2T? c2t[tseq[i]] : mt == L2B_METH_G2A? g2a[tseq[i]] : tseq[i];
 			x = (x << 2 | c) & mask;
 			if (++l >= kmer) {
-				if (h[x] > 0 && i >= h[x])
-					++a[i - h[x]]; // inspired by the Hough transform for line finding
+				if (h[x] > 0) {
+					if (i >= h[x])
+						++a[i - h[x]]; // inspired by the Hough transform for line finding
+					if (dc) {
+						int32_t p;
+						for (p = h[x]; p > 0; p = nx[p])
+							++dc[i - p + qlen], ++n_hit;
+					}
+				}
 			}
-		} else x = 0, l = 0;
+		} else x = 0, l = 0, amb = 1;
 	}
+	if (dc && !amb) *n_dc = n_hit;
 	for (i = 0, max = 0; i < tlen; ++i)
 		if (max < a[i])
 			max = a[i], *max_i = i;
 	for (i = 0, *n_good = 0; i < tlen; ++i)
 		if (a[i] > max>>1) ++*n_good;
-	kfree(km, h);
 	kfree(km, a);
 	return max;
 }
@@ -321,9 +360,62 @@ typedef struct {
 	mb_hit_t *a;
 } mb_hit_v;
 
-static const mb_hit_t *mb_matesw_core(void *km, const mb_opt_t *opt, const l2b_t *l2b, const mb_pestat_t pes[4], const mb_hit_t *h0, int32_t r0,
-	int32_t len, uint8_t *seq[2], l2b_meth_t mt0, mb_hit_v *h1, int32_t min_sc, ksw_extz_t *ez)
+/* The fewest exact k-mer hits a local alignment of mb_matesw_align()'s ksw_ll_*_core call (match 1, mismatch -pen or lower, a gap
+ * of l bases -(gapo + l*gape)) scoring at least T holds between a query of qlen bases and a target, neither with an ambiguous base,
+ * and in *span the most its diagonals can differ; <= 0 when there is no bound. The alignment's matching bases form runs separated
+ * by its X mismatches and G gaps, so it holds at least M - (k-1)(X + G + 1) hits, where M = qlen - C - X - I with C clipped and I
+ * inserted query bases, while qlen - T >= C + X(1 + pen) + I + G*gapo + (I + deleted bases)*gape. w[d] below is the most
+ * C + kX + I + (k-1)G a deficit d = qlen - T allows (a gap longer than one base gains no more than one base and clips), and the
+ * diagonals of its runs differ by at most I + deleted bases <= (d - gapo) / gape. */
+static int32_t mb_qgram_min_hits(void *km, const mb_opt_t *opt, int32_t qlen, int32_t T, int32_t k, int32_t *span)
 {
+	int8_t mat[25];
+	int32_t b_mm = (opt->b + opt->a - 1) / opt->a;
+	int32_t b_ts = (opt->b_ts + opt->a - 1) / opt->a;
+	int32_t b_ambi = (opt->b_ambi + opt->a - 1) / opt->a;
+	int32_t gapo = (opt->q + opt->a - 1) / opt->a;
+	int32_t gape = (opt->e + opt->a - 1) / opt->a;
+	int32_t D = qlen - T, d, i, j, pen = INT32_MAX, c_x, c_del, c_ins, ret, *w;
+	*span = 0;
+	if (D < 0 || gapo < 0 || gape < 1 || gapo + gape > 255) return 0;
+	ksw_gen_nt4_mat(mat, 1, b_mm, b_ts, b_ambi, 0); // as mb_matesw_align() without methylation
+	for (i = 0; i < 4; ++i) {
+		if (mat[i * 5 + i] != 1) return 0;
+		for (j = 0; j < 4; ++j)
+			if (i != j && -mat[i * 5 + j] < pen) pen = -mat[i * 5 + j];
+	}
+	if (pen < 0) return 0;
+	c_x = 1 + pen, c_del = gapo + gape, c_ins = c_del + 1;
+	w = Kmalloc(km, int32_t, D + 1);
+	w[0] = 0;
+	for (d = 1; d <= D; ++d) {
+		int32_t v = w[d - 1] + 1; // a clipped base
+		if (d >= c_x && w[d - c_x] + k > v) v = w[d - c_x] + k; // a mismatch
+		if (d >= c_del && w[d - c_del] + k - 1 > v) v = w[d - c_del] + k - 1; // a one-base deletion
+		if (d >= c_ins && w[d - c_ins] + k > v) v = w[d - c_ins] + k; // a one-base insertion
+		w[d] = v;
+	}
+	ret = qlen - (k - 1) - w[D];
+	kfree(km, w);
+	*span = D >= c_del? (D - gapo) / gape : 0;
+	return ret;
+}
+
+static int mb_qgram_short(int32_t n, const uint16_t *dc, int32_t n_hit, int32_t span, int32_t min_hit)
+{ // whether every run of span+1 consecutive diagonals in dc[0..n) holds fewer than min_hit hits
+	int32_t i, s;
+	if (n_hit < min_hit) return 1;
+	for (i = s = 0; i < n; ++i) {
+		s += dc[i];
+		if (i > span) s -= dc[i - span - 1];
+		if (s >= min_hit) return 0;
+	}
+	return 1;
+}
+
+static const mb_hit_t *mb_matesw_core(void *km, const mb_opt_t *opt, const l2b_t *l2b, const mb_pestat_t pes[4], const mb_hit_t *h0, int32_t r0,
+	int32_t len, uint8_t *seq[2], l2b_meth_t mt0, mb_hit_v *h1, int32_t min_sc, ksw_extz_t *ez, mb_qkmer_t *qk, int32_t qg_min, int32_t qg_span)
+{ // qg_min > 0: skip a window whose k-mer hits show that no alignment reaches max(opt->min_dp_max, min_sc) (mb_qgram_min_hits())
 	int32_t dir, skip[4];
 	int64_t pos5;
 	const mb_hit_t *ret = 0;
@@ -345,22 +437,24 @@ static const mb_hit_t *mb_matesw_core(void *km, const mb_opt_t *opt, const l2b_t
 		if (te > l2b->ctg[h0->tid].len) te = l2b->ctg[h0->tid].len;
 		if (te - ts > len) {
 			int64_t ts2 = ts, te2 = te;
-			int32_t max_ug, max_i, n_good, n_kmer;
+			int32_t max_ug, max_i, n_good, n_kmer, n_dc;
 			uint8_t *ref;
+			uint16_t *dc = 0;
 			l2b_meth_t mt = mt0;
 			mb_hit_t ht;
 			ht.p = 0;
 			ref = Kmalloc(km, uint8_t, te - ts);
 			if (is_rev) mt = l2b_meth_rev(mt0);
 			l2b_getseq(l2b, h0->tid, ts, te, ref);
-			max_ug = mb_ungap(km, len, seq[is_rev], te - ts, ref, 7, mt, &max_i, &n_good, &n_kmer);
+			if (qg_min > 0) dc = Kcalloc(km, uint16_t, te - ts + len);
+			max_ug = mb_ungap(km, qk, len, seq[is_rev], te - ts, ref, 7, mt, &max_i, &n_good, &n_kmer, dc, &n_dc);
 			if (max_ug >= 10 && max_ug >= len>>1 && n_good == 1) {
 				ts2 = ts + max_i - len / 2;
 				te2 = ts2 + len * 2;
 				if (ts2 < ts) ts2 = ts;
 				if (te2 > te) te2 = te;
 			}
-			if (max_ug >= 10 || max_ug >= n_kmer * 0.33)
+			if ((max_ug >= 10 || max_ug >= n_kmer * 0.33) && !(n_dc >= 0 && mb_qgram_short(te - ts + len, dc, n_dc, qg_span, qg_min)))
 				mb_matesw_align(km, opt, len, seq[is_rev], te2 - ts2, &ref[ts2 - ts], &ht, min_sc, mt, ez);
 			if (ht.p) { // a good hit found
 				ht.tid = h0->tid;
@@ -376,6 +470,7 @@ static const mb_hit_t *mb_matesw_core(void *km, const mb_opt_t *opt, const l2b_t
 				h1->a[h1->n++] = ht;
 				ret = &h1->a[h1->n - 1];
 			}
+			kfree(km, dc);
 			kfree(km, ref);
 		}
 	}
@@ -385,11 +480,12 @@ static const mb_hit_t *mb_matesw_core(void *km, const mb_opt_t *opt, const l2b_t
 static int32_t mb_matesw(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_t n_hit[2], mb_hit_t *hit[2], const mb_pestat_t pes[4], const mb_pairaux_t *paux0,
 	int32_t qlen[2], char *const qseq[2], int32_t is_meth)
 {
-	int32_t i, r, n_add, n_res, max[2], max2[2], skip[2], min_sc[2];
+	int32_t i, r, n_add, n_res, max[2], max2[2], skip[2], min_sc[2], amb[2], qg_min[2], qg_span[2];
 	mb_hit_v ha[2];
 	ksw_extz_t ez;
 	mb128_t *a;
 	uint8_t *qs[2][2];
+	mb_qkmer_t qk;
 	if (opt->max_rescue == 0) return 0;
 	// precalculate the number of rescue candidates
 	for (r = 0, n_res = 0; r < 2; ++r) {
@@ -425,14 +521,20 @@ static int32_t mb_matesw(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_
 	for (r = 0; r < 2; ++r) {
 		ha[r].n = ha[r].m = n_hit[r];
 		ha[r].a = hit[r];
-		for (i = 0; i < qlen[r]; ++i) {
+		for (i = 0, amb[r] = 0; i < qlen[r]; ++i) {
 			int32_t c = kom_nt4_table[(uint8_t)qseq[r][i]];
 			qs[r][0][i] = c;
 			qs[r][1][qlen[r] - 1 - i] = c < 4? 3 - c : 4;
+			if (c >= 4) amb[r] = 1;
 		}
 	}
 	min_sc[0] = mb_hit_sum_score(km, n_hit[0], hit[0]) / opt->a - opt->pen_unpair;
 	min_sc[1] = mb_hit_sum_score(km, n_hit[1], hit[1]) / opt->a - opt->pen_unpair;
+	for (r = 0; r < 2; ++r) { // the k-mer hits a rescue of mate r needs; none with methylation, an ambiguous base or --dbg-aln-pe, which prints every alignment
+		qg_min[r] = qg_span[r] = 0;
+		if (!is_meth && !amb[r] && !(kom_dbg_flag & MB_DBG_ALN_PE))
+			qg_min[r] = mb_qgram_min_hits(km, opt, qlen[r], opt->min_dp_max > min_sc[r]? opt->min_dp_max : min_sc[r], 7, &qg_span[r]);
+	}
 
 	// do alignment
 	max[0] = paux0->score, max2[0] = paux0->sub_sc, skip[0] = 0;
@@ -440,12 +542,15 @@ static int32_t mb_matesw(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_
 	memset(&ez, 0, sizeof(ez));
 	ez.m_cigar = 16;
 	ez.cigar = Kmalloc(km, uint32_t, ez.m_cigar);
+	memset(&qk, 0, sizeof(qk));
+	qk.x = Kmalloc(km, uint16_t, qlen[0] > qlen[1]? qlen[0] : qlen[1]); // n_kmer <= qlen
+	qk.nx = Kmalloc(km, uint16_t, qlen[0] > qlen[1]? qlen[0] : qlen[1]);
 	for (i = n_res - 1; i >= 0; --i) {
 		int32_t sc, r = a[i].y&1, j = a[i].y>>1;
 		const mb_hit_t *h0 = &ha[r].a[j], *h1;
 		l2b_meth_t mt = !is_meth? L2B_METH_NONE : r == 0? L2B_METH_G2A : L2B_METH_C2T; // rescuing mate: r=0 rescues R2(G2A), r=1 rescues R1(C2T)
 		if (skip[r]) continue;
-		h1 = mb_matesw_core(km, opt, l2b, pes, h0, r, qlen[!r], qs[!r], mt, &ha[!r], min_sc[!r], &ez);
+		h1 = mb_matesw_core(km, opt, l2b, pes, h0, r, qlen[!r], qs[!r], mt, &ha[!r], min_sc[!r], &ez, &qk, qg_min[!r], qg_span[!r]);
 		if (h1) { // rescue successful
 			sc = mb_pair_score(h0, h1, pes, opt->a);
 			if (sc > max[r]) max2[r] = max[r], max[r] = sc;
@@ -454,6 +559,9 @@ static int32_t mb_matesw(void *km, const mb_opt_t *opt, const l2b_t *l2b, int32_
 		}
 	}
 
+	kfree(km, qk.h);
+	kfree(km, qk.x);
+	kfree(km, qk.nx);
 	kfree(km, ez.cigar);
 	kfree(km, qs[0][0]);
 	kfree(km, a);

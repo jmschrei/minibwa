@@ -29,6 +29,10 @@ typedef struct {
 	char *cat_name, *cat_comm;
 	void *mmap; // mmap pointer
 	size_t mmap_len; // mmap length (for munmap)
+	// bucket index on global position, built at load: for each 2^L2B_BKT_SHIFT-base bucket b (and b = n_bkt),
+	// the first contig and the first ambiguous interval that end after the bucket's start; NULL when not built
+	uint64_t n_bkt;
+	uint32_t *bkt_ctg, *bkt_ambi;
 } l2b_t;
 
 #ifdef __cplusplus
@@ -36,6 +40,7 @@ extern "C" {
 #endif
 
 l2b_t *l2b_load(const char *fn);
+l2b_t *l2b_load_mt(const char *fn, int n_threads, void (*pfor)(int, void (*)(void*, long, int), void*, long)); // pfor: kt_for() or NULL
 l2b_t *l2b_load_mmap(const char *fn, int preload);
 void l2b_destroy(l2b_t *l2b);
 int64_t l2b_intv2cid(const l2b_t *l2b, uint64_t st, uint64_t en, int64_t *cst, int *rev);

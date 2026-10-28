@@ -22,6 +22,9 @@ void mb_bseq_close(mb_bseq_file_t *fp);
 mb_bseq1_t *mb_bseq_read(mb_bseq_file_t *fp, int64_t chunk_size, int with_qual, int with_comment, int frag_mode, int min_cnt, int64_t max_chunk_size, int *n_);
 mb_bseq1_t *mb_bseq_read_frag(int n_fp, mb_bseq_file_t **fp, int64_t chunk_size, int with_qual, int with_comment, int *n_);
 int mb_bseq_eof(mb_bseq_file_t *fp);
+void mb_bseq_warn_buffer(kstring_t *buf); // 0: print warnings to stderr; else append them to buf
+void mb_bseq_ahead(mb_bseq_file_t *fp, int on); // 1: inflate ahead of the parser on a thread (regular files only); 0: stop it
+void mb_bseq_read_hook(void (*hook)(void *data, const mb_bseq1_t *a, int n), void *data); // 0: none; else hook(data, a, n) after each record a batch takes, a[0..n-1] being the batch so far
 
 static inline int mb_qname_len(const char *s)
 {
